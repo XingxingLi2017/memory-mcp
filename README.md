@@ -68,9 +68,8 @@ To remove manually instead: `memory-mcp uninstall`
 ```bash
 git clone https://github.com/XingxingLi2017/memory-mcp.git
 cd memory-mcp
-npm install
-npm run build
-node dist/setup.js setup   # Point Copilot CLI at local build
+npm install -g .   # Installs dependencies, builds, and registers globally
+memory-mcp setup
 ```
 
 ## License
