@@ -7,9 +7,6 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const COPILOT_DIR_NAME = ".copilot";
-const MCP_CONFIG_FILE = "mcp-config.json";
-const INSTRUCTIONS_FILE = "copilot-instructions.md";
 const MCP_SERVER_NAME = "memory";
 
 const INSTRUCTIONS_BLOCK = `
@@ -26,12 +23,45 @@ Do not skip the memory search step — it ensures continuity across sessions.
 
 const INSTRUCTIONS_MARKER = "## Memory Recall";
 
+// ---------------------------------------------------------------------------
+// Target profiles: Copilot CLI vs Claude Code CLI
+// ---------------------------------------------------------------------------
+
+type TargetProfile = {
+  name: string;
+  /** Directory that holds memory files and DB */
+  workspaceDir: string;
+  /** Path to MCP config JSON */
+  mcpConfigPath: string;
+  /** Path to instructions file */
+  instructionsPath: string;
+  /** Extra env vars to pass to the MCP server */
+  serverEnv?: Record<string, string>;
+};
+
 function getHomeDir(): string {
   return process.env.HOME ?? process.env.USERPROFILE ?? "";
 }
 
-function getCopilotDir(): string {
-  return path.join(getHomeDir(), COPILOT_DIR_NAME);
+function buildProfile(target: "copilot" | "claude"): TargetProfile {
+  const home = getHomeDir();
+  if (target === "claude") {
+    const claudeDir = path.join(home, ".claude");
+    return {
+      name: "Claude Code",
+      workspaceDir: claudeDir,
+      mcpConfigPath: path.join(home, ".claude.json"),
+      instructionsPath: path.join(claudeDir, "CLAUDE.md"),
+      serverEnv: { MEMORY_WORKSPACE: claudeDir },
+    };
+  }
+  const copilotDir = path.join(home, ".copilot");
+  return {
+    name: "Copilot CLI",
+    workspaceDir: copilotDir,
+    mcpConfigPath: path.join(copilotDir, "mcp-config.json"),
+    instructionsPath: path.join(copilotDir, "copilot-instructions.md"),
+  };
 }
 
 /**
@@ -71,9 +101,15 @@ type McpConfig = {
   [key: string]: unknown;
 };
 
-function setupMcpConfig(copilotDir: string): { changed: boolean; message: string } {
-  const configPath = path.join(copilotDir, MCP_CONFIG_FILE);
+function setupMcpConfig(profile: TargetProfile): { changed: boolean; message: string } {
+  const configPath = profile.mcpConfigPath;
   const serverEntryPath = resolveServerPath();
+
+  // Ensure parent directory exists
+  const configDir = path.dirname(configPath);
+  if (!fs.existsSync(configDir)) {
+    fs.mkdirSync(configDir, { recursive: true });
+  }
 
   const config: McpConfig = (readJsonFile(configPath) as McpConfig) ?? {};
 
@@ -85,17 +121,20 @@ function setupMcpConfig(copilotDir: string): { changed: boolean; message: string
   const existing = servers[MCP_SERVER_NAME] as Record<string, unknown> | undefined;
 
   // Build the expected server config
-  const expected = {
+  const expected: Record<string, unknown> = {
     command: "node",
     args: [serverEntryPath],
   };
+  if (profile.serverEnv) {
+    expected.env = profile.serverEnv;
+  }
 
   if (existing) {
     const existingArgs = (existing as { args?: string[] }).args;
     if (
       (existing as { command?: string }).command === expected.command &&
       Array.isArray(existingArgs) &&
-      existingArgs[0] === expected.args[0]
+      existingArgs[0] === (expected.args as string[])[0]
     ) {
       return { changed: false, message: `MCP server "${MCP_SERVER_NAME}" already configured.` };
     }
@@ -114,8 +153,14 @@ function setupMcpConfig(copilotDir: string): { changed: boolean; message: string
 // Copilot instructions
 // ---------------------------------------------------------------------------
 
-function setupInstructions(copilotDir: string): { changed: boolean; message: string } {
-  const instrPath = path.join(copilotDir, INSTRUCTIONS_FILE);
+function setupInstructions(profile: TargetProfile): { changed: boolean; message: string } {
+  const instrPath = profile.instructionsPath;
+
+  // Ensure parent directory exists
+  const instrDir = path.dirname(instrPath);
+  if (!fs.existsSync(instrDir)) {
+    fs.mkdirSync(instrDir, { recursive: true });
+  }
 
   let content = "";
   try {
@@ -138,9 +183,9 @@ function setupInstructions(copilotDir: string): { changed: boolean; message: str
 // Uninstall
 // ---------------------------------------------------------------------------
 
-function uninstall(copilotDir: string): void {
+function uninstall(profile: TargetProfile): void {
   // Remove MCP server entry
-  const configPath = path.join(copilotDir, MCP_CONFIG_FILE);
+  const configPath = profile.mcpConfigPath;
   const config = readJsonFile(configPath) as McpConfig | null;
   if (config?.mcpServers) {
     const servers = config.mcpServers as Record<string, unknown>;
@@ -154,7 +199,7 @@ function uninstall(copilotDir: string): void {
   }
 
   // Remove instructions block
-  const instrPath = path.join(copilotDir, INSTRUCTIONS_FILE);
+  const instrPath = profile.instructionsPath;
   try {
     let content = fs.readFileSync(instrPath, "utf-8");
     if (content.includes(INSTRUCTIONS_MARKER)) {
@@ -165,7 +210,7 @@ function uninstall(copilotDir: string): void {
   } catch {}
 
   // Notify about residual data
-  const dbPath = path.join(copilotDir, "memory.db");
+  const dbPath = path.join(profile.workspaceDir, "memory.db");
   if (fs.existsSync(dbPath)) {
     console.log(`\n  Note: Memory database retained at ${dbPath}`);
     console.log(`  To remove all data: rm ${dbPath} ${dbPath}-wal ${dbPath}-shm`);
@@ -179,40 +224,47 @@ function uninstall(copilotDir: string): void {
 function main() {
   const args = process.argv.slice(2);
   const command = args[0];
+  const flags = new Set(args.slice(1));
 
-  if (command !== "setup" && command !== "uninstall") {
-    console.log(`memory-mcp — Local memory management for Copilot CLI
+  const validCommands = ["setup", "uninstall"];
+  if (!command || !validCommands.includes(command)) {
+    console.log(`memory-mcp — Local memory management for AI coding assistants
 
 Usage:
-  memory-mcp setup       Configure Copilot CLI to use the memory MCP server
-  memory-mcp uninstall   Remove memory MCP configuration from Copilot CLI
+  memory-mcp setup [--claude]       Configure MCP server for Copilot CLI (or Claude Code)
+  memory-mcp uninstall [--claude]   Remove memory MCP configuration
 
-The MCP server itself is started automatically by Copilot CLI.`);
+Options:
+  --claude    Target Claude Code CLI instead of GitHub Copilot CLI
+
+The MCP server itself is started automatically by the host CLI.`);
     process.exit(0);
   }
 
-  const copilotDir = getCopilotDir();
-  if (!fs.existsSync(copilotDir)) {
-    fs.mkdirSync(copilotDir, { recursive: true });
+  const target = flags.has("--claude") ? "claude" : "copilot";
+  const profile = buildProfile(target);
+
+  if (!fs.existsSync(profile.workspaceDir)) {
+    fs.mkdirSync(profile.workspaceDir, { recursive: true });
   }
 
   if (command === "uninstall") {
-    uninstall(copilotDir);
-    console.log("\nDone. Restart Copilot CLI to apply changes.");
+    uninstall(profile);
+    console.log(`\nDone. Restart ${profile.name} to apply changes.`);
     return;
   }
 
   // --- setup ---
-  console.log("Setting up memory-mcp for Copilot CLI...\n");
+  console.log(`Setting up memory-mcp for ${profile.name}...\n`);
 
-  const mcpResult = setupMcpConfig(copilotDir);
+  const mcpResult = setupMcpConfig(profile);
   console.log(mcpResult.changed ? `✓ ${mcpResult.message}` : `  ${mcpResult.message}`);
 
-  const instrResult = setupInstructions(copilotDir);
+  const instrResult = setupInstructions(profile);
   console.log(instrResult.changed ? `✓ ${instrResult.message}` : `  ${instrResult.message}`);
 
-  console.log("\nDone! Restart Copilot CLI to activate memory search.");
-  console.log("Create MEMORY.md or memory/*.md in your project to start storing memories.");
+  console.log(`\nDone! Restart ${profile.name} to activate memory search.`);
+  console.log(`Create MEMORY.md or memory/*.md in ${profile.workspaceDir} to start storing memories.`);
 }
 
 main();

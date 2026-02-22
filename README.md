@@ -1,8 +1,8 @@
 # memory-mcp
 
-Local memory management MCP server for GitHub Copilot CLI.
+Local memory management MCP server for AI coding assistants (GitHub Copilot CLI, Claude Code).
 
-Indexes `MEMORY.md` and `memory/*.md` files into a SQLite database with FTS5 full-text search, and exposes them as MCP tools that Copilot CLI calls automatically.
+Indexes `MEMORY.md` and `memory/*.md` files into a SQLite database with FTS5 full-text search, and exposes them as MCP tools that the host CLI calls automatically.
 
 ## Quick Start
 
@@ -10,18 +10,24 @@ Indexes `MEMORY.md` and `memory/*.md` files into a SQLite database with FTS5 ful
 # Install globally
 npm install -g memory-mcp
 
-# Configure Copilot CLI (idempotent, safe to re-run)
+# Configure for GitHub Copilot CLI
 memory-mcp setup
+
+# Or configure for Claude Code CLI
+memory-mcp setup --claude
 ```
 
-That's it. Next time you launch `copilot`, the memory server starts automatically.
+Next time you launch `copilot` or `claude`, the memory server starts automatically.
 
 ## Usage
 
-Memory files live in `~/.copilot/` (global, shared across all projects):
+Memory files live in a dot-directory under your home folder:
+
+- **Copilot CLI**: `~/.copilot/` (default)
+- **Claude Code**: `~/.claude/` (when using `--claude`)
 
 ```
-~/.copilot/
+~/.copilot/  (or ~/.claude/)
 ├── MEMORY.md              # Top-level memory file
 └── memory/
     ├── decisions.md       # Architecture decisions
@@ -29,7 +35,7 @@ Memory files live in `~/.copilot/` (global, shared across all projects):
     └── context.md         # Project context
 ```
 
-Copilot will automatically search these files before answering questions about prior work, decisions, or preferences.
+The host CLI will automatically search these files before answering questions about prior work, decisions, or preferences.
 
 ## Tools
 
@@ -60,8 +66,8 @@ Copilot will automatically search these files before answering questions about p
 npm uninstall -g memory-mcp
 ```
 
-The `preuninstall` hook automatically removes the MCP config and instructions from `~/.copilot/`.
-To remove manually instead: `memory-mcp uninstall`
+The `preuninstall` hook automatically removes config and instructions for both Copilot CLI and Claude Code.
+To remove config manually without uninstalling: `memory-mcp uninstall` or `memory-mcp uninstall --claude`
 
 ## Development
 

@@ -18,7 +18,7 @@
     "start": "node dist/server.js",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build",
-    "preuninstall": "node dist/setup.js uninstall",
+    "preuninstall": "node dist/setup.js uninstall && node dist/setup.js uninstall --claude",
     "test": "node --test dist/**/*.test.js"
   },
   "keywords": [
