@@ -213,7 +213,11 @@ function uninstall(profile: TargetProfile): void {
   const dbPath = path.join(profile.workspaceDir, "memory.db");
   if (fs.existsSync(dbPath)) {
     console.log(`\n  Note: Memory database retained at ${dbPath}`);
-    console.log(`  To remove all data: rm ${dbPath} ${dbPath}-wal ${dbPath}-shm`);
+    const isWin = process.platform === "win32";
+    const cmd = isWin
+      ? `del "${dbPath}" "${dbPath}-wal" "${dbPath}-shm"`
+      : `rm ${dbPath} ${dbPath}-wal ${dbPath}-shm`;
+    console.log(`  To remove all data: ${cmd}`);
   }
 }
 
