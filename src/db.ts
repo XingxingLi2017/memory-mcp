@@ -14,8 +14,30 @@ export function openDatabase(dbPath: string): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
 
+  // Check for schema version mismatch — rebuild if outdated
+  const needsRebuild = checkSchemaVersion(db);
+  if (needsRebuild) {
+    console.error("[memory-mcp] Schema version changed, rebuilding index (memory files are not affected)");
+    db.exec("DROP TABLE IF EXISTS chunks_fts");
+    db.exec("DROP TABLE IF EXISTS chunks");
+    db.exec("DROP TABLE IF EXISTS files");
+    db.exec("DROP TABLE IF EXISTS meta");
+  }
+
   ensureSchema(db);
   return db;
+}
+
+function checkSchemaVersion(db: Database.Database): boolean {
+  try {
+    const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as
+      | { value: string }
+      | undefined;
+    if (!row) return false;
+    return Number(row.value) !== SCHEMA_VERSION;
+  } catch {
+    return false;
+  }
 }
 
 function ensureSchema(db: Database.Database): void {

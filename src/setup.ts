@@ -163,6 +163,13 @@ function uninstall(copilotDir: string): void {
       console.log(`✓ Removed memory recall instructions from ${instrPath}`);
     }
   } catch {}
+
+  // Notify about residual data
+  const dbPath = path.join(copilotDir, "memory.db");
+  if (fs.existsSync(dbPath)) {
+    console.log(`\n  Note: Memory database retained at ${dbPath}`);
+    console.log(`  To remove all data: rm ${dbPath} ${dbPath}-wal ${dbPath}-shm`);
+  }
 }
 
 // ---------------------------------------------------------------------------

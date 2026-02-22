@@ -1,5 +1,4 @@
 import type Database from "better-sqlite3";
-import fsSync from "node:fs";
 import {
   hashText,
   listMemoryFiles,
@@ -74,7 +73,7 @@ function indexFile(
   entry: MemoryFileEntry,
   ftsOk: boolean,
 ): void {
-  const content = fsSync.readFileSync(entry.absPath, "utf-8");
+  const content = entry.content;
   const chunks = chunkMarkdown(content).filter((c) => c.text.trim().length > 0);
   const now = Date.now();
 

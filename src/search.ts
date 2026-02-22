@@ -12,15 +12,22 @@ export type SearchResult = {
 
 /**
  * Build an FTS5 match expression from a raw query string.
- * Tokenizes on word boundaries and joins with AND.
+ * Tokenizes on word boundaries (latin) and individual characters (CJK).
+ * Uses OR for better recall with BM25 ranking.
  */
 function buildFtsQuery(raw: string): string | null {
-  const tokens = raw
-    .match(/[A-Za-z0-9\u4e00-\u9fff\u3400-\u4dbf_]+/g)
-    ?.map((t) => t.trim())
-    .filter(Boolean);
-  if (!tokens || tokens.length === 0) return null;
-  return tokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" AND ");
+  // Split into latin words and individual CJK characters
+  const tokens: string[] = [];
+  // Match latin/digit words
+  const latinWords = raw.match(/[A-Za-z0-9_]+/g);
+  if (latinWords) tokens.push(...latinWords);
+  // Match individual CJK characters (FTS5 unicode61 indexes them as single tokens)
+  const cjkChars = raw.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g);
+  if (cjkChars) tokens.push(...cjkChars);
+
+  const filtered = tokens.map((t) => t.trim()).filter(Boolean);
+  if (filtered.length === 0) return null;
+  return filtered.map((t) => `"${t.replaceAll('"', "")}"`).join(" OR ");
 }
 
 /**

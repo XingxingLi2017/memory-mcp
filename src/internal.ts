@@ -9,6 +9,8 @@ export type MemoryFileEntry = {
   mtimeMs: number;
   size: number;
   hash: string;
+  /** File content (cached from initial read) */
+  content: string;
 };
 
 export type MemoryChunk = {
@@ -27,6 +29,7 @@ export function hashText(value: string): string {
  */
 export async function listMemoryFiles(workspaceDir: string): Promise<string[]> {
   const result: string[] = [];
+  const skippedSymlinks: string[] = [];
 
   // Check top-level memory files
   for (const name of ["MEMORY.md", "memory.md"]) {
@@ -35,6 +38,8 @@ export async function listMemoryFiles(workspaceDir: string): Promise<string[]> {
       const stat = await fs.lstat(p);
       if (stat.isFile() && !stat.isSymbolicLink()) {
         result.push(p);
+      } else if (stat.isSymbolicLink()) {
+        skippedSymlinks.push(p);
       }
     } catch {}
   }
@@ -44,9 +49,13 @@ export async function listMemoryFiles(workspaceDir: string): Promise<string[]> {
   try {
     const stat = await fs.lstat(memoryDir);
     if (stat.isDirectory() && !stat.isSymbolicLink()) {
-      await walkDir(memoryDir, result);
+      await walkDir(memoryDir, result, skippedSymlinks);
     }
   } catch {}
+
+  if (skippedSymlinks.length > 0) {
+    console.error(`[memory-mcp] Skipped ${skippedSymlinks.length} symlink(s): ${skippedSymlinks.join(", ")}`);
+  }
 
   // Dedupe by realpath
   if (result.length <= 1) return result;
@@ -63,13 +72,16 @@ export async function listMemoryFiles(workspaceDir: string): Promise<string[]> {
   return deduped;
 }
 
-async function walkDir(dir: string, files: string[]): Promise<void> {
+async function walkDir(dir: string, files: string[], skippedSymlinks?: string[]): Promise<void> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
-    if (entry.isSymbolicLink()) continue;
+    if (entry.isSymbolicLink()) {
+      skippedSymlinks?.push(full);
+      continue;
+    }
     if (entry.isDirectory()) {
-      await walkDir(full, files);
+      await walkDir(full, files, skippedSymlinks);
     } else if (entry.isFile() && entry.name.endsWith(".md")) {
       files.push(full);
     }
@@ -88,6 +100,7 @@ export async function buildFileEntry(
     mtimeMs: stat.mtimeMs,
     size: stat.size,
     hash: hashText(content),
+    content,
   };
 }
 
@@ -140,8 +153,14 @@ export function chunkMarkdown(
     const line = lines[i] ?? "";
     const lineNo = i + 1;
     const lineSize = line.length + 1;
+    const isHeading = /^#{1,6}\s/.test(line);
 
-    if (currentChars + lineSize > maxChars && current.length > 0) {
+    // Break before headings to keep them with their content
+    if (isHeading && current.length > 0) {
+      flush();
+      current = [];
+      currentChars = 0;
+    } else if (currentChars + lineSize > maxChars && current.length > 0) {
       flush();
       carryOverlap();
     }
