@@ -61,6 +61,7 @@ The host CLI will automatically search these files before answering questions ab
 |------|-------------|
 | `memory_search` | Hybrid search (BM25 + vector) across all memory files. Supports `query`, `maxResults`, `minScore`, `after`/`before` time filters |
 | `memory_get` | Read specific lines from a memory file |
+| `memory_write` | Save user-specific knowledge (preferences, decisions, context) to persistent memory. The more it learns, the less the user needs to explain |
 | `memory_status` | Show index status: file/chunk counts, embedding coverage, health checks |
 
 ## How it Works

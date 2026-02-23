@@ -19,6 +19,29 @@ Before answering questions about prior work, decisions, dates, people, preferenc
 3. If low confidence after search, say you checked but found nothing relevant
 
 Do not skip the memory search step — it ensures continuity across sessions.
+
+## Memory Write
+
+You are building a personal memory of this user. As memories grow, you understand them better and they need to explain less.
+Call \`memory_write\` proactively — do not wait for "remember this."
+
+<when_to_write>
+- User reveals how they work: coding style, tools, workflow, naming conventions
+- A decision is made with reasoning worth preserving
+- User corrects you — save it so the mistake never repeats
+- Project structure, architecture, or deployment details emerge
+- You discover gotchas, workarounds, or non-obvious patterns
+- User mentions people, teams, or responsibilities
+- Anything that would save the user from re-explaining next session
+</when_to_write>
+
+<how_to_write>
+- One clear statement per call — atomic, not compound
+- Pick a descriptive category: preferences, decisions, project, people, workflow, gotchas
+- Include source when known (e.g. "user said", "observed from code")
+- Never store secrets, passwords, API keys, or personal identifiers
+- Skip generic knowledge — only store what is specific to this user
+</how_to_write>
 `.trim();
 
 const INSTRUCTIONS_MARKER = "## Memory Recall";
