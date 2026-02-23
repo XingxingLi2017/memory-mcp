@@ -10,6 +10,7 @@ Indexes `MEMORY.md` and `memory/` files into a SQLite database with **hybrid sea
 - **CJK support** — jieba-wasm pre-segmentation enables Chinese/Japanese/Korean full-text search
 - **Multi-format** — indexes `.md`, `.txt`, `.json`, `.jsonl`, `.yaml`, `.yml` files
 - **Graceful degradation** — vector search requires optional native dependencies; falls back to FTS-only if unavailable
+- **Session transcript indexing** — automatically indexes Copilot CLI (`events.jsonl`) and Claude Code (`~/.claude/projects/`) conversation history for cross-session search
 - **Incremental sync** — SHA256-based change detection; unchanged files are skipped
 - **Embedding cache** — content-hash keyed cache avoids re-embedding unchanged text across file moves/renames
 - **Access tracking** — frequently accessed chunks get a gentle score boost
@@ -84,6 +85,8 @@ The host CLI will automatically search these files before answering questions ab
 | `MEMORY_DB_PATH` | `~/.copilot/memory.db` | Path to SQLite database |
 | `MEMORY_CHUNK_SIZE` | `512` | Chunk size in tokens for markdown splitting (64–4096). Changing triggers automatic index rebuild |
 | `MEMORY_TOKEN_MAX` | `4096` | Default max tokens per search response (100–16384). Controls snippet length and result count |
+| `MEMORY_SESSION_DAYS` | `30` | Only index session transcripts from the last N days (0 = index all) |
+| `MEMORY_SESSION_MAX` | `-1` | Max number of sessions to index, newest first (-1 = no limit, 0 = disable session indexing) |
 
 ## Uninstall
 

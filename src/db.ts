@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
+import crypto from "node:crypto";
 
 let sqliteVec: typeof import("sqlite-vec") | null = null;
 let sqliteVecLoaded = false;
@@ -39,10 +40,13 @@ export async function openDatabase(dbPath: string, opts?: { chunkSize?: number }
     }
   }
 
-  // Check for schema version or config mismatch — rebuild if outdated
+  // Check for schema version or config mismatch — atomic rebuild if outdated
   const needsRebuild = checkNeedsRebuild(db, opts?.chunkSize);
   if (needsRebuild) {
     console.error("[memory-mcp] Schema or config changed, rebuilding index (memory files are not affected)");
+    const rebuilt = await atomicRebuild(dbPath, db, vec, opts?.chunkSize);
+    if (rebuilt) return rebuilt;
+    // Fallback: in-place rebuild
     db.exec("DROP TABLE IF EXISTS chunks_fts");
     db.exec("DROP TABLE IF EXISTS chunks_vec");
     db.exec("DROP TABLE IF EXISTS embedding_cache");
@@ -53,6 +57,77 @@ export async function openDatabase(dbPath: string, opts?: { chunkSize?: number }
 
   ensureSchema(db, vec, opts?.chunkSize);
   return db;
+}
+
+/**
+ * Atomic rebuild: create temp DB, set up schema, swap via rename.
+ * If anything fails, old DB is untouched.
+ */
+async function atomicRebuild(
+  dbPath: string,
+  oldDb: Database.Database,
+  vec: typeof import("sqlite-vec") | null,
+  chunkSize?: number,
+): Promise<Database.Database | null> {
+  const tempPath = `${dbPath}.tmp-${crypto.randomUUID()}`;
+  try {
+    const tempDb = new Database(tempPath);
+    tempDb.pragma("journal_mode = WAL");
+    tempDb.pragma("busy_timeout = 5000");
+    if (vec) {
+      try { vec.load(tempDb); } catch {}
+    }
+    ensureSchema(tempDb, vec, chunkSize);
+
+    // Seed embedding cache from old DB
+    try {
+      const rows = oldDb.prepare(`SELECT hash, embedding, updated_at FROM embedding_cache`).all() as Array<{
+        hash: string; embedding: Buffer; updated_at: number;
+      }>;
+      const insert = tempDb.prepare(
+        `INSERT OR IGNORE INTO embedding_cache (hash, embedding, updated_at) VALUES (?, ?, ?)`,
+      );
+      const tx = tempDb.transaction(() => {
+        for (const row of rows) insert.run(row.hash, row.embedding, row.updated_at);
+      });
+      tx();
+    } catch {}
+
+    // Close both DBs for swap
+    oldDb.close();
+    tempDb.close();
+
+    // Swap: rename temp → main (atomic on same filesystem)
+    // On Windows, rename may fail if file is locked; remove first
+    try {
+      fs.unlinkSync(dbPath);
+    } catch {}
+    // Clean WAL/SHM files from old DB
+    for (const suffix of ["-wal", "-shm"]) {
+      try { fs.unlinkSync(dbPath + suffix); } catch {}
+    }
+    fs.renameSync(tempPath, dbPath);
+    // Clean temp WAL/SHM if any
+    for (const suffix of ["-wal", "-shm"]) {
+      try { fs.unlinkSync(tempPath + suffix); } catch {}
+    }
+
+    // Reopen the swapped DB
+    const newDb = new Database(dbPath);
+    newDb.pragma("journal_mode = WAL");
+    newDb.pragma("busy_timeout = 5000");
+    if (vec) {
+      try { vec.load(newDb); } catch {}
+    }
+    return newDb;
+  } catch (err) {
+    console.error("[memory-mcp] atomic rebuild failed, falling back to in-place rebuild:", err);
+    // Clean up temp files
+    for (const f of [tempPath, tempPath + "-wal", tempPath + "-shm"]) {
+      try { fs.unlinkSync(f); } catch {}
+    }
+    return null;
+  }
 }
 
 function checkNeedsRebuild(db: Database.Database, chunkSize?: number): boolean {

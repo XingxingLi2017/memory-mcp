@@ -2,8 +2,11 @@ import type Database from "better-sqlite3";
 import {
   hashText,
   listMemoryFiles,
+  listSessionFiles,
   buildFileEntry,
+  buildSessionEntry,
   chunkFile,
+  chunkMarkdown,
   type MemoryFileEntry,
 } from "./internal.js";
 import { isFtsAvailable, isVecAvailable } from "./db.js";
@@ -45,7 +48,7 @@ export async function syncMemoryFiles(
       continue;
     }
 
-    indexFile(db, entry, ftsOk, opts?.chunkSize);
+    indexFile(db, entry, ftsOk, "memory", opts?.chunkSize);
     indexed++;
   }
 
@@ -84,32 +87,37 @@ function indexFile(
   db: Database.Database,
   entry: MemoryFileEntry,
   ftsOk: boolean,
+  source: string,
   chunkSize?: number,
 ): void {
   const content = entry.content;
-  const chunks = chunkFile(content, entry.path, chunkSize).filter((c) => c.text.trim().length > 0);
+  // Session content is already extracted text — chunk as markdown
+  const chunks = source === "sessions"
+    ? chunkMarkdown(content, chunkSize ? { tokens: chunkSize, overlap: Math.floor(chunkSize / 8) } : undefined)
+    : chunkFile(content, entry.path, chunkSize);
+  const filtered = chunks.filter((c) => c.text.trim().length > 0);
   const now = Date.now();
 
   // Clear old data for this file (including vectors)
   const oldChunkIds = db
     .prepare(`SELECT id FROM chunks WHERE path = ? AND source = ?`)
-    .all(entry.path, "memory") as Array<{ id: string }>;
+    .all(entry.path, source) as Array<{ id: string }>;
   try {
     for (const { id } of oldChunkIds) {
       db.prepare(`DELETE FROM chunks_vec WHERE id = ?`).run(id);
     }
   } catch {}
-  db.prepare(`DELETE FROM chunks WHERE path = ? AND source = ?`).run(entry.path, "memory");
+  db.prepare(`DELETE FROM chunks WHERE path = ? AND source = ?`).run(entry.path, source);
   if (ftsOk) {
     try {
-      db.prepare(`DELETE FROM chunks_fts WHERE path = ? AND source = ?`).run(entry.path, "memory");
+      db.prepare(`DELETE FROM chunks_fts WHERE path = ? AND source = ?`).run(entry.path, source);
     } catch {}
   }
 
-  // Generate chunk IDs first
-  const chunkData = chunks.map((chunk) => ({
+  // Generate chunk IDs
+  const chunkData = filtered.map((chunk) => ({
     ...chunk,
-    id: hashText(`memory:${entry.path}:${chunk.startLine}:${chunk.endLine}:${chunk.hash}`),
+    id: hashText(`${source}:${entry.path}:${chunk.startLine}:${chunk.endLine}:${chunk.hash}`),
   }));
 
   const insertChunk = db.prepare(
@@ -126,18 +134,84 @@ function indexFile(
 
   const transaction = db.transaction(() => {
     for (const chunk of chunkData) {
-      insertChunk.run(chunk.id, entry.path, "memory", chunk.startLine, chunk.endLine, chunk.hash, chunk.text, now);
-      insertFts?.run(segmentText(chunk.text), chunk.id, entry.path, "memory", chunk.startLine, chunk.endLine);
+      insertChunk.run(chunk.id, entry.path, source, chunk.startLine, chunk.endLine, chunk.hash, chunk.text, now);
+      insertFts?.run(segmentText(chunk.text), chunk.id, entry.path, source, chunk.startLine, chunk.endLine);
     }
 
     // Upsert file record
     db.prepare(
       `INSERT INTO files (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(path) DO UPDATE SET source=excluded.source, hash=excluded.hash, mtime=excluded.mtime, size=excluded.size`,
-    ).run(entry.path, "memory", entry.hash, entry.mtimeMs, entry.size);
+    ).run(entry.path, source, entry.hash, entry.mtimeMs, entry.size);
   });
 
   transaction();
+}
+
+/**
+ * Sync session transcript files (events.jsonl) into the database.
+ * Extracts user/assistant messages and indexes them as source="sessions".
+ */
+export async function syncSessionFiles(
+  db: Database.Database,
+  workspaceDir: string,
+  opts?: { force?: boolean; chunkSize?: number; maxDays?: number; maxCount?: number },
+): Promise<SyncResult> {
+  const files = await listSessionFiles(workspaceDir, {
+    maxDays: opts?.maxDays,
+    maxCount: opts?.maxCount,
+  });
+  const ftsOk = isFtsAvailable(db);
+  const activePaths = new Set<string>();
+  let indexed = 0;
+  let skipped = 0;
+
+  for (const absPath of files) {
+    const entry = await buildSessionEntry(absPath, workspaceDir);
+    if (!entry) continue;
+
+    activePaths.add(entry.path);
+
+    const existing = db
+      .prepare(`SELECT hash FROM files WHERE path = ? AND source = ?`)
+      .get(entry.path, "sessions") as { hash: string } | undefined;
+
+    if (!opts?.force && existing?.hash === entry.hash) {
+      skipped++;
+      continue;
+    }
+
+    indexFile(db, entry, ftsOk, "sessions", opts?.chunkSize);
+    indexed++;
+  }
+
+  // Remove stale session entries
+  let deleted = 0;
+  const staleRows = db
+    .prepare(`SELECT path FROM files WHERE source = ?`)
+    .all("sessions") as Array<{ path: string }>;
+
+  for (const row of staleRows) {
+    if (activePaths.has(row.path)) continue;
+    const chunkIds = db
+      .prepare(`SELECT id FROM chunks WHERE path = ? AND source = ?`)
+      .all(row.path, "sessions") as Array<{ id: string }>;
+    db.prepare(`DELETE FROM files WHERE path = ? AND source = ?`).run(row.path, "sessions");
+    db.prepare(`DELETE FROM chunks WHERE path = ? AND source = ?`).run(row.path, "sessions");
+    if (ftsOk) {
+      try {
+        db.prepare(`DELETE FROM chunks_fts WHERE path = ? AND source = ?`).run(row.path, "sessions");
+      } catch {}
+    }
+    try {
+      for (const c of chunkIds) {
+        db.prepare(`DELETE FROM chunks_vec WHERE id = ?`).run(c.id);
+      }
+    } catch {}
+    deleted++;
+  }
+
+  return { indexed, skipped, deleted };
 }
 
 /**

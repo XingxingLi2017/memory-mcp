@@ -462,3 +462,200 @@ export function chunkMarkdown(
   flush();
   return chunks;
 }
+
+// ---------------------------------------------------------------------------
+// Session transcript discovery & parsing
+// ---------------------------------------------------------------------------
+
+export type SessionFileEntry = MemoryFileEntry;
+
+type SessionSource = {
+  dir: string;
+  /** 'copilot' scans {dir}/{uuid}/events.jsonl, 'claude' scans {dir}/{project}/*.jsonl */
+  kind: "copilot" | "claude";
+};
+
+/**
+ * Resolve session directories for supported host CLIs.
+ * Copilot CLI: ~/.copilot/session-state/{uuid}/events.jsonl
+ * Claude Code: ~/.claude/projects/{project}/*.jsonl
+ */
+function resolveSessionSources(): SessionSource[] {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  if (!home) return [];
+  return [
+    { dir: path.join(home, ".copilot", "session-state"), kind: "copilot" },
+    { dir: path.join(home, ".claude", "projects"), kind: "claude" },
+  ];
+}
+
+/**
+ * Discover session JSONL files from all supported CLIs,
+ * filtered by maxDays and maxCount.
+ * maxCount=0 disables session indexing. maxCount=-1 means no count limit.
+ */
+export async function listSessionFiles(
+  workspaceDir: string,
+  opts?: { maxDays?: number; maxCount?: number },
+): Promise<string[]> {
+  const maxCount = opts?.maxCount ?? -1;
+  if (maxCount === 0) return [];
+
+  const maxDays = opts?.maxDays ?? 30;
+  const cutoff = maxDays > 0 ? Date.now() - maxDays * 24 * 60 * 60 * 1000 : 0;
+
+  const candidates: Array<{ path: string; mtimeMs: number }> = [];
+  for (const src of resolveSessionSources()) {
+    try {
+      const entries = await fs.readdir(src.dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (src.kind === "copilot") {
+          // Copilot: {dir}/{uuid}/events.jsonl
+          const eventsFile = path.join(src.dir, entry.name, "events.jsonl");
+          try {
+            const stat = await fs.stat(eventsFile);
+            if (stat.isFile() && stat.size > 0 && stat.mtimeMs >= cutoff) {
+              candidates.push({ path: eventsFile, mtimeMs: stat.mtimeMs });
+            }
+          } catch {}
+        } else if (src.kind === "claude") {
+          // Claude: {dir}/{project}/*.jsonl — each jsonl is a session
+          const projDir = path.join(src.dir, entry.name);
+          try {
+            const projEntries = await fs.readdir(projDir, { withFileTypes: true });
+            for (const pe of projEntries) {
+              if (!pe.isFile() || !pe.name.endsWith(".jsonl")) continue;
+              const filePath = path.join(projDir, pe.name);
+              try {
+                const stat = await fs.stat(filePath);
+                if (stat.size > 0 && stat.mtimeMs >= cutoff) {
+                  candidates.push({ path: filePath, mtimeMs: stat.mtimeMs });
+                }
+              } catch {}
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  // Sort by mtime descending (newest first), then apply count limit
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const limited = maxCount > 0 ? candidates.slice(0, maxCount) : candidates;
+  return limited.map((c) => c.path);
+}
+
+/** Extract text from Claude Code message content (string or content-block array). */
+function extractClaudeText(content: unknown): string | null {
+  if (typeof content === "string") {
+    const t = content.trim();
+    return t || null;
+  }
+  if (Array.isArray(content)) {
+    const texts: string[] = [];
+    for (const block of content) {
+      if (block && typeof block === "object" && (block as { type?: string }).type === "text") {
+        const t = (block as { text?: string }).text;
+        if (t && typeof t === "string") texts.push(t);
+      }
+    }
+    const joined = texts.join("\n").trim();
+    return joined || null;
+  }
+  return null;
+}
+
+const CLAUDE_CMD_RE = /^<(?:command-|local-command-)/;
+/** Returns true if text is a Claude Code internal command (not real user input). */
+function isClaudeCommand(text: string): boolean {
+  return text.startsWith("/") || CLAUDE_CMD_RE.test(text);
+}
+
+/**
+ * Parse a session JSONL file (Copilot CLI or Claude Code) and extract
+ * user/assistant messages. Auto-detects format from JSON structure.
+ * Returns a MemoryFileEntry with the extracted text as content.
+ */
+export async function buildSessionEntry(
+  absPath: string,
+  workspaceDir: string,
+): Promise<SessionFileEntry | null> {
+  try {
+    const stat = await fs.stat(absPath);
+    const raw = await fs.readFile(absPath, "utf-8");
+    const lines = raw.split("\n");
+    const collected: string[] = [];
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let record: Record<string, unknown>;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const recType = record.type as string | undefined;
+      if (!recType) continue;
+
+      // --- Copilot CLI format ---
+      // {type:"user.message", data:{content:"..."}}
+      if (recType === "user.message") {
+        const data = record.data as { content?: string } | undefined;
+        const text = data?.content;
+        if (text && typeof text === "string" && text.trim() && !text.startsWith("/")) {
+          collected.push(`User: ${text.trim()}`);
+        }
+        continue;
+      }
+      if (recType === "assistant.message") {
+        const data = record.data as { content?: string } | undefined;
+        const text = data?.content;
+        if (text && typeof text === "string" && text.trim()) {
+          collected.push(`Assistant: ${text.trim()}`);
+        }
+        continue;
+      }
+
+      // --- Claude Code format ---
+      // {type:"user", message:{role:"user", content:"..." | [{type:"text",text:"..."}]}}
+      if (recType === "user") {
+        const msg = record.message as { content?: unknown } | undefined;
+        const content = msg?.content;
+        const text = extractClaudeText(content);
+        if (text && !isClaudeCommand(text)) {
+          collected.push(`User: ${text}`);
+        }
+        continue;
+      }
+      // {type:"assistant", message:{role:"assistant", content:[{type:"text",text:"..."}]}}
+      if (recType === "assistant") {
+        const msg = record.message as { content?: unknown } | undefined;
+        const text = extractClaudeText(msg?.content);
+        if (text) collected.push(`Assistant: ${text}`);
+        continue;
+      }
+    }
+
+    if (collected.length === 0) return null;
+
+    const content = collected.join("\n");
+    // Derive session ID from file path:
+    //   Copilot: dirname is the UUID  (session-state/{uuid}/events.jsonl)
+    //   Claude:  filename is the UUID ({project}/{uuid}.jsonl)
+    const basename = path.basename(absPath, ".jsonl");
+    const sessionId = basename === "events" ? path.basename(path.dirname(absPath)) : basename;
+    const relPath = `sessions/${sessionId}.jsonl`;
+
+    return {
+      path: relPath,
+      absPath,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      hash: hashText(content),
+      content,
+    };
+  } catch {
+    return null;
+  }
+}
