@@ -11,36 +11,37 @@ export type SearchResult = {
 };
 
 /**
- * Build an FTS5 match expression from a raw query string.
- * Tokenizes on word boundaries (latin) and individual characters (CJK).
- * Uses OR for better recall with BM25 ranking.
+ * FTS5 query expressions returned by buildFtsQueries.
+ * - nearExpr: NEAR query for CJK phrase matching (null if no CJK multi-char)
+ * - orExpr: OR query for broad recall (always present)
  */
-function buildFtsQuery(raw: string): string | null {
-  // Split into latin words and individual CJK characters
+type FtsQueries = { nearExpr: string | null; orExpr: string };
+
+/**
+ * Build FTS5 match expressions from a raw query string.
+ * Returns separate NEAR (precision) and OR (recall) expressions
+ * so the caller can do a two-step search: NEAR first, OR fallback.
+ */
+function buildFtsQueries(raw: string): FtsQueries | null {
   const latinTokens: string[] = [];
   const cjkTokens: string[] = [];
   const latinWords = raw.match(/[A-Za-z0-9_]+/g);
   if (latinWords) latinTokens.push(...latinWords);
-  // Match individual CJK characters (FTS5 unicode61 indexes them as single tokens)
   const cjkChars = raw.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g);
   if (cjkChars) cjkTokens.push(...cjkChars);
 
   const allTokens = [...latinTokens, ...cjkTokens].map((t) => t.trim()).filter(Boolean);
   if (allTokens.length === 0) return null;
 
-  // For CJK: use NEAR to keep characters close together (simulates phrase matching)
-  // For latin: use OR for recall
-  const parts: string[] = [];
+  // NEAR expression: only when multiple CJK characters present
+  let nearExpr: string | null = null;
   if (cjkTokens.length > 1) {
     const quoted = cjkTokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" ");
-    parts.push(`NEAR(${quoted}, 5)`);
+    nearExpr = `NEAR(${quoted}, 5)`;
   }
-  // Add all tokens as OR fallback
-  const orPart = allTokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" OR ");
-  parts.push(orPart);
 
-  // NEAR first (higher relevance), OR as fallback
-  return parts.length > 1 ? `(${parts[0]}) OR (${parts[1]})` : parts[0]!;
+  const orExpr = allTokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" OR ");
+  return { nearExpr, orExpr };
 }
 
 /**
@@ -57,6 +58,16 @@ function bm25RankToScore(rank: number): number {
 }
 
 const SNIPPET_MAX_CHARS = 700;
+
+type FtsRow = {
+  id: string;
+  path: string;
+  source: string;
+  start_line: number;
+  end_line: number;
+  text: string;
+  rank: number;
+};
 
 /**
  * Search memory chunks using FTS5 full-text search.
@@ -77,39 +88,51 @@ export function searchMemory(
     return searchLike(db, cleaned, maxResults);
   }
 
-  const ftsQuery = buildFtsQuery(cleaned);
-  if (!ftsQuery) return searchLike(db, cleaned, maxResults);
+  const queries = buildFtsQueries(cleaned);
+  if (!queries) return searchLike(db, cleaned, maxResults);
+
+  const stmt = db.prepare(
+    `SELECT id, path, source, start_line, end_line, text, rank
+     FROM chunks_fts
+     WHERE chunks_fts MATCH ?
+     ORDER BY rank
+     LIMIT ?`,
+  );
+
+  const toResult = (row: FtsRow): SearchResult => ({
+    path: row.path,
+    startLine: row.start_line,
+    endLine: row.end_line,
+    score: bm25RankToScore(row.rank),
+    snippet: row.text.slice(0, SNIPPET_MAX_CHARS),
+    source: row.source,
+  });
 
   try {
-    const rows = db
-      .prepare(
-        `SELECT id, path, source, start_line, end_line, text, rank
-         FROM chunks_fts
-         WHERE chunks_fts MATCH ?
-         ORDER BY rank
-         LIMIT ?`,
-      )
-      .all(ftsQuery, maxResults * 3) as Array<{
-      id: string;
-      path: string;
-      source: string;
-      start_line: number;
-      end_line: number;
-      text: string;
-      rank: number;
-    }>;
+    // Step 1: NEAR query for CJK precision (if available)
+    let results: SearchResult[] = [];
+    if (queries.nearExpr) {
+      const nearRows = stmt.all(queries.nearExpr, maxResults) as FtsRow[];
+      results = nearRows.map(toResult).filter((r) => r.score >= minScore);
+    }
 
-    return rows
-      .map((row) => ({
-        path: row.path,
-        startLine: row.start_line,
-        endLine: row.end_line,
-        score: bm25RankToScore(row.rank),
-        snippet: row.text.slice(0, SNIPPET_MAX_CHARS),
-        source: row.source,
-      }))
-      .filter((r) => r.score >= minScore)
-      .slice(0, maxResults);
+    // Step 2: OR fallback if NEAR didn't fill maxResults
+    if (results.length < maxResults) {
+      const orRows = stmt.all(queries.orExpr, maxResults * 3) as FtsRow[];
+      const seenIds = new Set(results.map((r) => `${r.path}:${r.startLine}`));
+      for (const row of orRows) {
+        const key = `${row.path}:${row.start_line}`;
+        if (seenIds.has(key)) continue;
+        const mapped = toResult(row);
+        if (mapped.score >= minScore) {
+          results.push(mapped);
+          seenIds.add(key);
+          if (results.length >= maxResults) break;
+        }
+      }
+    }
+
+    return results;
   } catch {
     return searchLike(db, cleaned, maxResults);
   }
