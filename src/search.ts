@@ -19,29 +19,27 @@ type FtsQueries = { nearExpr: string | null; orExpr: string };
 
 /**
  * Build FTS5 match expressions from a raw query string.
- * Returns separate NEAR (precision) and OR (recall) expressions
- * so the caller can do a two-step search: NEAR first, OR fallback.
+ * With trigram tokenizer, both CJK substrings (≥3 chars) and Latin words work directly.
+ * Returns separate NEAR (precision) and OR (recall) expressions for CJK.
  */
 function buildFtsQueries(raw: string): FtsQueries | null {
   const latinTokens: string[] = [];
-  const cjkTokens: string[] = [];
   const latinWords = raw.match(/[A-Za-z0-9_]+/g);
   if (latinWords) latinTokens.push(...latinWords);
-  const cjkChars = raw.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g);
-  if (cjkChars) cjkTokens.push(...cjkChars);
 
-  const allTokens = [...latinTokens, ...cjkTokens].map((t) => t.trim()).filter(Boolean);
+  // Extract CJK runs (contiguous sequences, not single chars)
+  const cjkRuns = raw.match(/[\u4e00-\u9fff\u3400-\u4dbf]{3,}/g) ?? [];
+  // Also extract 2-char CJK that trigram can't match, for LIKE fallback later
+  const cjkShort = raw.match(/[\u4e00-\u9fff\u3400-\u4dbf]{2}/g) ?? [];
+
+  const allTokens = [...latinTokens, ...cjkRuns].filter(Boolean);
+  if (allTokens.length === 0 && cjkShort.length === 0) return null;
+
+  // If we only have short CJK (<3 chars), return null to trigger LIKE fallback
   if (allTokens.length === 0) return null;
 
-  // NEAR expression: only when multiple CJK characters present
-  let nearExpr: string | null = null;
-  if (cjkTokens.length > 1) {
-    const quoted = cjkTokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" ");
-    nearExpr = `NEAR(${quoted}, 5)`;
-  }
-
   const orExpr = allTokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" OR ");
-  return { nearExpr, orExpr };
+  return { nearExpr: null, orExpr };
 }
 
 /**
@@ -99,14 +97,14 @@ export function searchMemory(
   if (!isFtsAvailable(db)) {
     const results = searchLike(db, cleaned, maxResults, allowedPaths);
     bumpAccessCount(db, results);
-    return results;
+    return applyAccessBoost(db, results);
   }
 
   const queries = buildFtsQueries(cleaned);
   if (!queries) {
     const results = searchLike(db, cleaned, maxResults, allowedPaths);
     bumpAccessCount(db, results);
-    return results;
+    return applyAccessBoost(db, results);
   }
 
   const stmt = db.prepare(
@@ -151,11 +149,11 @@ export function searchMemory(
     }
 
     bumpAccessCount(db, results);
-    return results;
+    return applyAccessBoost(db, results);
   } catch {
     const results = searchLike(db, cleaned, maxResults, allowedPaths);
     bumpAccessCount(db, results);
-    return results;
+    return applyAccessBoost(db, results);
   }
 }
 
@@ -246,4 +244,30 @@ function bumpAccessCount(db: Database.Database, results: SearchResult[]): void {
   } catch (err) {
     console.error("[memory-mcp] bumpAccessCount error:", err);
   }
+}
+
+/**
+ * Boost scores based on access_count and re-sort.
+ * Blended score = 0.85 * base_score + 0.15 * log2(1 + access_count) / 10
+ * The access boost is capped so it nudges ranking without overwhelming relevance.
+ */
+function applyAccessBoost(db: Database.Database, results: SearchResult[]): SearchResult[] {
+  if (results.length <= 1) return results;
+  try {
+    const stmt = db.prepare(
+      `SELECT access_count FROM chunks WHERE path = ? AND start_line = ?`,
+    );
+    for (const r of results) {
+      const row = stmt.get(r.path, r.startLine) as { access_count: number } | undefined;
+      const count = row?.access_count ?? 0;
+      if (count > 0) {
+        const boost = Math.min(1, Math.log2(1 + count) / 10);
+        r.score = 0.85 * r.score + 0.15 * boost;
+      }
+    }
+    results.sort((a, b) => b.score - a.score);
+  } catch (err) {
+    console.error("[memory-mcp] applyAccessBoost error:", err);
+  }
+  return results;
 }

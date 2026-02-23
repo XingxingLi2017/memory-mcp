@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export function openDatabase(dbPath: string): Database.Database {
   const dir = path.dirname(dbPath);
@@ -84,7 +84,8 @@ function ensureSchema(db: Database.Database): void {
         path UNINDEXED,
         source UNINDEXED,
         start_line UNINDEXED,
-        end_line UNINDEXED
+        end_line UNINDEXED,
+        tokenize='trigram case_sensitive 0'
       );
     `);
   } catch (err) {

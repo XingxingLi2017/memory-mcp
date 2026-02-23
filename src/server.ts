@@ -130,19 +130,51 @@ server.tool(
 
 server.tool(
   "memory_status",
-  "Show the current status of the memory index (file count, chunk count, last sync time).",
+  "Show the current status of the memory index (file count, chunk count, last sync time). Includes health checks.",
   {},
   async () => {
     await ensureSynced();
     const workspaceDir = resolveWorkspaceDir();
-    const files = (db.prepare(`SELECT COUNT(*) as c FROM files`).get() as { c: number }).c;
-    const chunks = (db.prepare(`SELECT COUNT(*) as c FROM chunks`).get() as { c: number }).c;
+    const fileCount = (db.prepare(`SELECT COUNT(*) as c FROM files`).get() as { c: number }).c;
+    const chunkCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks`).get() as { c: number }).c;
+
+    const warnings: string[] = [];
+
+    // Health check: too many files
+    if (fileCount > 50) {
+      warnings.push(`High file count (${fileCount}). Consider consolidating related memories.`);
+    }
+
+    // Health check: duplicate chunk content across files
+    const dupes = db
+      .prepare(
+        `SELECT hash, COUNT(DISTINCT path) as file_count, GROUP_CONCAT(DISTINCT path) as paths
+         FROM chunks GROUP BY hash HAVING file_count > 1 LIMIT 5`,
+      )
+      .all() as Array<{ hash: string; file_count: number; paths: string }>;
+    if (dupes.length > 0) {
+      const pairs = dupes.map((d) => d.paths).join("; ");
+      warnings.push(`Found ${dupes.length} chunk(s) with duplicate content across files: ${pairs}`);
+    }
+
+    // Health check: large files (>500 chunks)
+    const largeFiles = db
+      .prepare(
+        `SELECT path, COUNT(*) as cnt FROM chunks GROUP BY path HAVING cnt > 500`,
+      )
+      .all() as Array<{ path: string; cnt: number }>;
+    if (largeFiles.length > 0) {
+      const names = largeFiles.map((f) => `${f.path} (${f.cnt} chunks)`).join(", ");
+      warnings.push(`Large files: ${names}. Consider splitting.`);
+    }
+
     const status = {
       workspaceDir,
       dbPath,
-      files,
-      chunks,
+      files: fileCount,
+      chunks: chunkCount,
       lastSyncAt: lastSyncAt ? new Date(lastSyncAt).toISOString() : null,
+      warnings: warnings.length > 0 ? warnings : undefined,
     };
     return {
       content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
