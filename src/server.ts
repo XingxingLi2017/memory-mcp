@@ -348,20 +348,13 @@ server.tool(
       }
     }
 
-    // Write evidence file if provided, get ref tag
+    // Write evidence file if provided
     let evidencePath: string | undefined;
     let refTag = "";
     if (evidence && evidence.trim()) {
-      const evidenceDir = path.join(memoryDir, "evidence");
-      if (!fs.existsSync(evidenceDir)) {
-        fs.mkdirSync(evidenceDir, { recursive: true });
-      }
-      const factId = hashText(content).slice(0, 12);
-      const evidenceFile = path.join(evidenceDir, `${factId}.md`);
-      const evidenceContent = `# Evidence for: ${content}\n\n${evidence}\n`;
-      fs.writeFileSync(evidenceFile, evidenceContent, "utf-8");
-      evidencePath = `memory/evidence/${factId}.md`;
-      refTag = ` [ref:${evidencePath}]`;
+      const ev = writeEvidence(content, evidence);
+      evidencePath = ev.path;
+      refTag = ev.refTag;
     }
 
     // Write fact to .md file
@@ -535,6 +528,20 @@ function cleanupEvidence(line: string): void {
   try { fs.unlinkSync(absPath); } catch {}
 }
 
+/** Write an evidence file and return its path + ref tag. */
+function writeEvidence(fact: string, evidence: string): { path: string; refTag: string } {
+  const memoryDir = path.join(resolveWorkspaceDir(), "memory");
+  const evidenceDir = path.join(memoryDir, "evidence");
+  if (!fs.existsSync(evidenceDir)) {
+    fs.mkdirSync(evidenceDir, { recursive: true });
+  }
+  const factId = hashText(fact).slice(0, 12);
+  const evidenceFile = path.join(evidenceDir, `${factId}.md`);
+  fs.writeFileSync(evidenceFile, `# Evidence for: ${fact}\n\n${evidence}\n`, "utf-8");
+  const relPath = `memory/evidence/${factId}.md`;
+  return { path: relPath, refTag: ` [ref:${relPath}]` };
+}
+
 server.tool(
   "memory_forget",
   "Remove a memory entry that is outdated, incorrect, or no longer relevant. " +
@@ -610,17 +617,9 @@ server.tool(
     let evidencePath: string | undefined;
     let refTag = "";
     if (evidence && evidence.trim()) {
-      const memoryDir = path.join(resolveWorkspaceDir(), "memory");
-      const evidenceDir = path.join(memoryDir, "evidence");
-      if (!fs.existsSync(evidenceDir)) {
-        fs.mkdirSync(evidenceDir, { recursive: true });
-      }
-      const factId = hashText(new_content).slice(0, 12);
-      const evidenceFile = path.join(evidenceDir, `${factId}.md`);
-      const evidenceContent = `# Evidence for: ${new_content}\n\n${evidence}\n`;
-      fs.writeFileSync(evidenceFile, evidenceContent, "utf-8");
-      evidencePath = `memory/evidence/${factId}.md`;
-      refTag = ` [ref:${evidencePath}]`;
+      const ev = writeEvidence(new_content, evidence);
+      evidencePath = ev.path;
+      refTag = ev.refTag;
     }
 
     const fileContent = fs.readFileSync(match.filePath, "utf-8");
