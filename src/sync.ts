@@ -90,7 +90,15 @@ function indexFile(
   const chunks = chunkFile(content, entry.path, chunkSize).filter((c) => c.text.trim().length > 0);
   const now = Date.now();
 
-  // Clear old data for this file
+  // Clear old data for this file (including vectors)
+  const oldChunkIds = db
+    .prepare(`SELECT id FROM chunks WHERE path = ? AND source = ?`)
+    .all(entry.path, "memory") as Array<{ id: string }>;
+  try {
+    for (const { id } of oldChunkIds) {
+      db.prepare(`DELETE FROM chunks_vec WHERE id = ?`).run(id);
+    }
+  } catch {}
   db.prepare(`DELETE FROM chunks WHERE path = ? AND source = ?`).run(entry.path, "memory");
   if (ftsOk) {
     try {
@@ -209,6 +217,11 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
       break;
     }
   }
+
+  // Clean stale embedding cache entries
+  try {
+    db.prepare(`DELETE FROM embedding_cache WHERE hash NOT IN (SELECT DISTINCT hash FROM chunks)`).run();
+  } catch {}
 
   return totalEmbedded;
 }

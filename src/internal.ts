@@ -115,19 +115,72 @@ export async function buildFileEntry(
 /**
  * Route to the appropriate chunker based on file extension.
  */
+const DEFAULT_MAX_CHUNK_CHARS = 512 * 4; // Same as markdown default
+
 export function chunkFile(content: string, filePath: string, chunkSize?: number): MemoryChunk[] {
+  const maxChars = (chunkSize ?? 512) * 4;
   const ext = extOf(filePath);
+  let chunks: MemoryChunk[];
   switch (ext) {
     case ".json":
-      return chunkJson(content);
+      chunks = chunkJson(content);
+      break;
     case ".jsonl":
-      return chunkJsonl(content);
+      chunks = chunkJsonl(content);
+      break;
     case ".yaml":
     case ".yml":
-      return chunkYaml(content);
+      chunks = chunkYaml(content);
+      break;
     default:
       return chunkMarkdown(content, chunkSize ? { tokens: chunkSize, overlap: Math.floor(chunkSize / 8) } : undefined);
   }
+  // Split oversized chunks (JSON/YAML may produce very large chunks)
+  return splitOversized(chunks, maxChars);
+}
+
+/**
+ * Split chunks that exceed maxChars into smaller line-based sub-chunks.
+ */
+function splitOversized(chunks: MemoryChunk[], maxChars: number): MemoryChunk[] {
+  const result: MemoryChunk[] = [];
+  for (const chunk of chunks) {
+    if (chunk.text.length <= maxChars) {
+      result.push(chunk);
+      continue;
+    }
+    const lines = chunk.text.split("\n");
+    let buf: string[] = [];
+    let bufStart = chunk.startLine;
+    let bufChars = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      if (bufChars + line.length + 1 > maxChars && buf.length > 0) {
+        const text = buf.join("\n");
+        result.push({
+          startLine: bufStart,
+          endLine: bufStart + buf.length - 1,
+          text,
+          hash: hashText(text),
+        });
+        buf = [];
+        bufStart = chunk.startLine + i;
+        bufChars = 0;
+      }
+      buf.push(line);
+      bufChars += line.length + 1;
+    }
+    if (buf.length > 0) {
+      const text = buf.join("\n");
+      result.push({
+        startLine: bufStart,
+        endLine: bufStart + buf.length - 1,
+        text,
+        hash: hashText(text),
+      });
+    }
+  }
+  return result;
 }
 
 /**
@@ -341,10 +394,6 @@ function singleChunk(content: string, lines: string[]): MemoryChunk[] {
     text: content,
     hash: hashText(content),
   }];
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**

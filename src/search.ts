@@ -31,7 +31,7 @@ function bm25RankToScore(rank: number): number {
   if (!Number.isFinite(rank)) return 0;
   const absRank = Math.abs(rank);
   if (absRank === 0) return 0;
-  return Math.min(1, Math.max(0, 1 + Math.log10(absRank) / 10));
+  return absRank / (1 + absRank);
 }
 
 const SNIPPET_MAX_CHARS = 700;
@@ -56,7 +56,7 @@ type FtsRow = {
 export type SearchOpts = {
   maxResults?: number;
   minScore?: number;
-  /** Maximum total tokens to return (controls snippet truncation). Default: 2048 */
+  /** Maximum total tokens to return (controls snippet truncation). Default: 4096 */
   tokenMax?: number;
   /** ISO 8601 timestamp — only include chunks from files modified after this time */
   after?: string;
@@ -87,7 +87,18 @@ export async function searchMemory(
   const pathFilter = (r: SearchResult) => !allowedPaths || allowedPaths.has(r.path);
 
   const ftsOk = isFtsAvailable(db);
-  const vecOk = isVecAvailable(db);
+  let vecOk = isVecAvailable(db);
+
+  // Skip vector search if embedding coverage is too low (still syncing)
+  if (vecOk) {
+    try {
+      const total = (db.prepare(`SELECT COUNT(*) as c FROM chunks`).get() as { c: number }).c;
+      const embedded = (db.prepare(`SELECT COUNT(*) as c FROM chunks_vec`).get() as { c: number }).c;
+      if (total > 0 && embedded / total < 0.8) {
+        vecOk = false;
+      }
+    } catch {}
+  }
 
   // FTS search
   let ftsResults: SearchResult[] = [];
@@ -115,7 +126,9 @@ export async function searchMemory(
             source: row.source,
           }))
           .filter((r) => r.score >= minScore && pathFilter(r));
-      } catch {}
+      } catch (err) {
+        console.error("[memory-mcp] FTS search error:", err);
+      }
     }
   }
 
