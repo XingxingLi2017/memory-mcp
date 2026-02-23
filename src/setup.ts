@@ -24,6 +24,7 @@ Do not skip the memory search step — it ensures continuity across sessions.
 
 You are building a personal memory of this user. As memories grow, you understand them better and they need to explain less.
 Call \`memory_write\` proactively — do not wait for "remember this."
+Write proactively whenever you learn something about the user, their projects, or their way of working.
 
 <when_to_write>
 - User reveals how they work: coding style, tools, workflow, naming conventions
@@ -41,6 +42,7 @@ Call \`memory_write\` proactively — do not wait for "remember this."
 - Include source when known (e.g. "user said", "observed from code")
 - Never store secrets, passwords, API keys, or personal identifiers
 - Skip generic knowledge — only store what is specific to this user
+- Do NOT store ephemeral context: current task details, temporary debugging, or one-off commands
 </how_to_write>
 `.trim();
 

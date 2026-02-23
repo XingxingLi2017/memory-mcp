@@ -620,6 +620,8 @@ export async function buildSessionEntry(
     const raw = await fs.readFile(absPath, "utf-8");
     const lines = raw.split("\n");
     const collected: string[] = [];
+    let firstTimestamp: string | undefined;
+    let project: string | undefined;
 
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -631,6 +633,16 @@ export async function buildSessionEntry(
       }
       const recType = record.type as string | undefined;
       if (!recType) continue;
+
+      // Capture metadata from first record for header
+      if (!firstTimestamp) {
+        const ts = record.timestamp as string | undefined;
+        if (ts) firstTimestamp = ts;
+      }
+      if (!project) {
+        const cwd = record.cwd as string | undefined;
+        if (cwd) project = path.basename(cwd);
+      }
 
       // --- Copilot CLI format ---
       // {type:"user.message", data:{content:"..."}}
@@ -673,7 +685,15 @@ export async function buildSessionEntry(
 
     if (collected.length === 0) return null;
 
-    const content = collected.join("\n");
+    // Prepend metadata header for better retrieval context
+    const headerParts: string[] = [];
+    if (project) headerParts.push(`Project: ${project}`);
+    if (firstTimestamp) {
+      const date = firstTimestamp.slice(0, 10); // YYYY-MM-DD
+      headerParts.push(`Date: ${date}`);
+    }
+    const header = headerParts.length > 0 ? headerParts.join(" | ") + "\n" : "";
+    const content = header + collected.join("\n");
     // Derive session ID from file path:
     //   Copilot: dirname is the UUID  (session-state/{uuid}/events.jsonl)
     //   Claude:  filename is the UUID ({project}/{uuid}.jsonl)

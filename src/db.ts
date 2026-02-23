@@ -97,18 +97,19 @@ async function atomicRebuild(
     oldDb.close();
     tempDb.close();
 
-    // Swap: rename temp → main (atomic on same filesystem)
-    // On Windows, rename may fail if file is locked; remove first
-    try {
-      fs.unlinkSync(dbPath);
-    } catch {}
+    // Swap: old → .bak, temp → main, delete .bak (safer on Windows)
+    const bakPath = `${dbPath}.bak`;
+    try { fs.unlinkSync(bakPath); } catch {}
+    try { fs.renameSync(dbPath, bakPath); } catch {}
     // Clean WAL/SHM files from old DB
     for (const suffix of ["-wal", "-shm"]) {
       try { fs.unlinkSync(dbPath + suffix); } catch {}
     }
     fs.renameSync(tempPath, dbPath);
-    // Clean temp WAL/SHM if any
+    // Clean backup and temp WAL/SHM
+    try { fs.unlinkSync(bakPath); } catch {}
     for (const suffix of ["-wal", "-shm"]) {
+      try { fs.unlinkSync(bakPath + suffix); } catch {}
       try { fs.unlinkSync(tempPath + suffix); } catch {}
     }
 
