@@ -140,17 +140,19 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
   if (!vecOk) return 0;
 
   let totalEmbedded = 0;
+  const findMissing = db.prepare(
+    `SELECT c.id, c.hash, c.text FROM chunks c
+     WHERE NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.id = c.id)
+     LIMIT 100`,
+  );
+  const findCache = db.prepare(`SELECT embedding FROM embedding_cache WHERE hash = ?`);
+  const insertVec = db.prepare(`INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?, ?)`);
+  const insertCache = db.prepare(
+    `INSERT OR REPLACE INTO embedding_cache (hash, embedding, updated_at) VALUES (?, ?, ?)`,
+  );
 
   while (true) {
-    // Find chunks without embeddings
-    const missing = db
-      .prepare(
-        `SELECT c.id, c.hash, c.text FROM chunks c
-         WHERE NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.id = c.id)
-         LIMIT 100`,
-      )
-      .all() as Array<{ id: string; hash: string; text: string }>;
-
+    const missing = findMissing.all() as Array<{ id: string; hash: string; text: string }>;
     if (missing.length === 0) break;
 
     // Check embedding cache for already-computed hashes
@@ -159,9 +161,7 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
 
     for (let i = 0; i < missing.length; i++) {
       const row = missing[i]!;
-      const hit = db
-        .prepare(`SELECT embedding FROM embedding_cache WHERE hash = ?`)
-        .get(row.hash) as { embedding: Buffer } | undefined;
+      const hit = findCache.get(row.hash) as { embedding: Buffer } | undefined;
       if (hit) {
         cached.set(row.id, hit.embedding);
       } else {
@@ -181,13 +181,8 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
       }
     }
 
-    // Store all embeddings
-    const insertVec = db.prepare(`INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?, ?)`);
-    const insertCache = db.prepare(
-      `INSERT OR REPLACE INTO embedding_cache (hash, embedding, updated_at) VALUES (?, ?, ?)`,
-    );
+    // Store all embeddings (including cached hits even if embed failed)
     const now = Date.now();
-
     const tx = db.transaction(() => {
       for (const [id, buf] of cached) {
         insertVec.run(id, buf);
@@ -205,8 +200,13 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
 
     totalEmbedded += cached.size + newEmbeddings.length;
 
-    // If embedding failed, stop processing further batches
-    if (embedFailed) break;
+    if (embedFailed) {
+      const remaining = (db.prepare(
+        `SELECT COUNT(*) as c FROM chunks c WHERE NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.id = c.id)`,
+      ).get() as { c: number }).c;
+      console.error(`[memory-mcp] embedding stopped early; ${remaining} chunk(s) still need embedding`);
+      break;
+    }
   }
 
   return totalEmbedded;

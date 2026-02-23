@@ -164,13 +164,21 @@ export async function searchMemory(
 
 /**
  * Min-max normalize scores to 0-1 range.
+ * NOTE: mutates results in-place for efficiency.
  */
 function normalizeScores(results: SearchResult[]): void {
-  if (results.length <= 1) return;
+  if (results.length === 0) return;
+  if (results.length === 1) {
+    results[0]!.score = 1.0;
+    return;
+  }
   const scores = results.map((r) => r.score);
   const max = Math.max(...scores);
   const min = Math.min(...scores);
-  if (max === min) return;
+  if (max === min) {
+    for (const r of results) r.score = 1.0;
+    return;
+  }
   for (const r of results) {
     r.score = (r.score - min) / (max - min);
   }

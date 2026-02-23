@@ -2,7 +2,17 @@
 
 Local memory management MCP server for AI coding assistants (GitHub Copilot CLI, Claude Code).
 
-Indexes `MEMORY.md` and `memory/*.md` files into a SQLite database with FTS5 full-text search, and exposes them as MCP tools that the host CLI calls automatically.
+Indexes `MEMORY.md` and `memory/` files into a SQLite database with **hybrid search** — BM25 full-text search + vector semantic search — and exposes them as MCP tools that the host CLI calls automatically.
+
+## Features
+
+- **Hybrid search** — combines BM25 keyword matching with vector cosine similarity for best-of-both-worlds retrieval
+- **CJK support** — jieba-wasm pre-segmentation enables Chinese/Japanese/Korean full-text search
+- **Multi-format** — indexes `.md`, `.txt`, `.json`, `.yaml`, `.yml` files
+- **Graceful degradation** — vector search requires optional native dependencies; falls back to FTS-only if unavailable
+- **Incremental sync** — SHA256-based change detection; unchanged files are skipped
+- **Embedding cache** — content-hash keyed cache avoids re-embedding unchanged text across file moves/renames
+- **Access tracking** — frequently accessed chunks get a gentle score boost
 
 ## Quick Start
 
@@ -18,6 +28,14 @@ memory-mcp setup --claude
 ```
 
 Next time you launch `copilot` or `claude`, the memory server starts automatically.
+
+### Vector Search (Optional)
+
+Vector search uses [node-llama-cpp](https://github.com/withcatai/node-llama-cpp) and [sqlite-vec](https://github.com/asg017/sqlite-vec) as optional dependencies. On most platforms (Linux x64/arm64, macOS x64/arm64, Windows x64) these install automatically via prebuilt binaries.
+
+If they fail to install (e.g. missing build tools), the server still works with FTS5-only search — no manual intervention needed.
+
+The embedding model ([embeddinggemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF), ~328 MB) is downloaded automatically on first use to `~/.node-llama-cpp/models/`.
 
 ## Usage
 
@@ -41,17 +59,21 @@ The host CLI will automatically search these files before answering questions ab
 
 | Tool | Description |
 |------|-------------|
-| `memory_search` | Full-text search across all memory files |
+| `memory_search` | Hybrid search (BM25 + vector) across all memory files. Supports `query`, `maxResults`, `minScore`, `after`/`before` time filters |
 | `memory_get` | Read specific lines from a memory file |
-| `memory_status` | Show index status (file count, chunk count) |
+| `memory_status` | Show index status: file/chunk counts, embedding coverage, health checks |
 
 ## How it Works
 
-1. Copilot CLI spawns the MCP server on startup (via stdio)
+1. The host CLI spawns the MCP server on startup (via stdio)
 2. On each search, syncs `MEMORY.md`, `memory.md`, and `memory/` directory
-3. Files are chunked using a sliding window (512 tokens, 64 token overlap)
-4. Chunks are indexed in SQLite FTS5 for full-text search
-5. Incremental sync via SHA256 hash — unchanged files are skipped
+3. Files are chunked by markdown headings (or as a single chunk for non-markdown)
+4. Chunks are indexed in **SQLite FTS5** (with jieba pre-segmentation for CJK text)
+5. Chunks are embedded with **embeddinggemma-300M** (768-dim vectors) and stored in **sqlite-vec**
+6. Search runs both FTS5 (BM25 ranking) and vector (cosine similarity) in parallel
+7. Results are **min-max normalized** then merged with 50/50 weighting
+8. Access-count boost gently promotes frequently retrieved chunks
+9. Falls back to LIKE search if FTS5 is unavailable
 
 ## Environment Variables
 
