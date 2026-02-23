@@ -9,12 +9,6 @@ import { openDatabase } from "./db.js";
 import { syncMemoryFiles } from "./sync.js";
 import { searchMemory } from "./search.js";
 
-const DEFAULT_DB_PATH = path.join(
-  process.env.HOME ?? process.env.USERPROFILE ?? "~",
-  ".copilot",
-  "memory.db",
-);
-
 const DEFAULT_WORKSPACE = path.join(
   process.env.HOME ?? process.env.USERPROFILE ?? "~",
   ".copilot",
@@ -25,7 +19,7 @@ function resolveWorkspaceDir(): string {
 }
 
 function resolveDbPath(): string {
-  return process.env.MEMORY_DB_PATH ?? DEFAULT_DB_PATH;
+  return process.env.MEMORY_DB_PATH ?? path.join(resolveWorkspaceDir(), "memory.db");
 }
 
 const server = new McpServer({

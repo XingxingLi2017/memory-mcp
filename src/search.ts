@@ -17,17 +17,30 @@ export type SearchResult = {
  */
 function buildFtsQuery(raw: string): string | null {
   // Split into latin words and individual CJK characters
-  const tokens: string[] = [];
-  // Match latin/digit words
+  const latinTokens: string[] = [];
+  const cjkTokens: string[] = [];
   const latinWords = raw.match(/[A-Za-z0-9_]+/g);
-  if (latinWords) tokens.push(...latinWords);
+  if (latinWords) latinTokens.push(...latinWords);
   // Match individual CJK characters (FTS5 unicode61 indexes them as single tokens)
   const cjkChars = raw.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g);
-  if (cjkChars) tokens.push(...cjkChars);
+  if (cjkChars) cjkTokens.push(...cjkChars);
 
-  const filtered = tokens.map((t) => t.trim()).filter(Boolean);
-  if (filtered.length === 0) return null;
-  return filtered.map((t) => `"${t.replaceAll('"', "")}"`).join(" OR ");
+  const allTokens = [...latinTokens, ...cjkTokens].map((t) => t.trim()).filter(Boolean);
+  if (allTokens.length === 0) return null;
+
+  // For CJK: use NEAR to keep characters close together (simulates phrase matching)
+  // For latin: use OR for recall
+  const parts: string[] = [];
+  if (cjkTokens.length > 1) {
+    const quoted = cjkTokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" ");
+    parts.push(`NEAR(${quoted}, 5)`);
+  }
+  // Add all tokens as OR fallback
+  const orPart = allTokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" OR ");
+  parts.push(orPart);
+
+  // NEAR first (higher relevance), OR as fallback
+  return parts.length > 1 ? `(${parts[0]}) OR (${parts[1]})` : parts[0]!;
 }
 
 /**
