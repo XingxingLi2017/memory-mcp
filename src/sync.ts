@@ -71,12 +71,16 @@ export async function syncMemoryFiles(
         db.prepare(`DELETE FROM chunks_fts WHERE path = ? AND source = ?`).run(row.path, "memory");
       } catch {}
     }
-    // Clean vector entries
+    // Clean vector entries in batch
     try {
-      for (const c of chunkIds) {
-        db.prepare(`DELETE FROM chunks_vec WHERE id = ?`).run(c.id);
+      if (chunkIds.length > 0) {
+        const placeholders = chunkIds.map(() => "?").join(",");
+        db.prepare(`DELETE FROM chunks_vec WHERE id IN (${placeholders})`).run(...chunkIds.map(c => c.id));
       }
-    } catch {}
+    } catch {
+      // sqlite-vec may not support IN — fall back to per-row delete
+      try { for (const c of chunkIds) db.prepare(`DELETE FROM chunks_vec WHERE id = ?`).run(c.id); } catch {}
+    }
     deleted++;
   }
 
@@ -204,10 +208,13 @@ export async function syncSessionFiles(
       } catch {}
     }
     try {
-      for (const c of chunkIds) {
-        db.prepare(`DELETE FROM chunks_vec WHERE id = ?`).run(c.id);
+      if (chunkIds.length > 0) {
+        const placeholders = chunkIds.map(() => "?").join(",");
+        db.prepare(`DELETE FROM chunks_vec WHERE id IN (${placeholders})`).run(...chunkIds.map(c => c.id));
       }
-    } catch {}
+    } catch {
+      try { for (const c of chunkIds) db.prepare(`DELETE FROM chunks_vec WHERE id = ?`).run(c.id); } catch {}
+    }
     deleted++;
   }
 
@@ -294,7 +301,7 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
 
   // Clean stale embedding cache entries
   try {
-    db.prepare(`DELETE FROM embedding_cache WHERE hash NOT IN (SELECT DISTINCT hash FROM chunks)`).run();
+    db.prepare(`DELETE FROM embedding_cache WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chunks.hash = embedding_cache.hash)`).run();
   } catch {}
 
   return totalEmbedded;

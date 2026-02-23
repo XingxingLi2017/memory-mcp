@@ -155,6 +155,25 @@ function splitOversized(chunks: MemoryChunk[], maxChars: number): MemoryChunk[] 
     let bufChars = 0;
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!;
+      // Single line exceeds maxChars — split by character boundary
+      if (line.length > maxChars) {
+        // Flush buffer first
+        if (buf.length > 0) {
+          const text = buf.join("\n");
+          result.push({ startLine: bufStart, endLine: bufStart + buf.length - 1, text, hash: hashText(text) });
+          buf = [];
+          bufChars = 0;
+        }
+        const overlap = Math.max(64, maxChars >> 3);
+        let pos = 0;
+        while (pos < line.length) {
+          const slice = line.slice(pos, pos + maxChars);
+          result.push({ startLine: chunk.startLine + i, endLine: chunk.startLine + i, text: slice, hash: hashText(slice) });
+          pos += maxChars - overlap;
+        }
+        bufStart = chunk.startLine + i + 1;
+        continue;
+      }
       if (bufChars + line.length + 1 > maxChars && buf.length > 0) {
         const text = buf.join("\n");
         result.push({
@@ -446,6 +465,21 @@ export function chunkMarkdown(
     const lineNo = i + 1;
     const lineSize = line.length + 1;
     const isHeading = /^#{1,6}\s/.test(line);
+
+    // Single line exceeds maxChars — flush current, then split by character
+    if (lineSize > maxChars) {
+      flush();
+      current = [];
+      currentChars = 0;
+      const charOverlap = Math.max(64, maxChars >> 3);
+      let pos = 0;
+      while (pos < line.length) {
+        const slice = line.slice(pos, pos + maxChars);
+        chunks.push({ startLine: lineNo, endLine: lineNo, text: slice, hash: hashText(slice) });
+        pos += maxChars - charOverlap;
+      }
+      continue;
+    }
 
     // Break before headings to keep them with their content
     if (isHeading && current.length > 0) {
