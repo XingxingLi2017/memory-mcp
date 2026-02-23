@@ -204,11 +204,6 @@ server.tool(
     try {
       cacheCount = (db.prepare(`SELECT COUNT(*) as c FROM embedding_cache`).get() as { c: number }).c;
     } catch {}
-    let factCount = 0;
-    try {
-      factCount = (db.prepare(`SELECT COUNT(*) as c FROM facts`).get() as { c: number }).c;
-    } catch {}
-
     const warnings: string[] = [];
 
     // Health check: too many files
@@ -248,7 +243,6 @@ server.tool(
       chunks: chunkCount,
       embeddedChunks: vecCount,
       embeddingCache: cacheCount,
-      facts: factCount,
       config: {
         chunkSize: resolveChunkSize(),
         tokenMax: resolveTokenMax(),
@@ -324,7 +318,7 @@ server.tool(
     // Semantic dedup: best-effort check (respects cooldown)
     await ensureSynced();
     const similar = await searchMemory(db, content, { maxResults: 3, minScore: 0.3 });
-    const memHits = similar.filter((r) => r.source === "memory" || r.source === "facts");
+    const memHits = similar.filter((r) => r.source === "memory");
     if (memHits.length > 0) {
       const queryWords = contentWords(content);
       for (const hit of memHits) {
@@ -354,8 +348,24 @@ server.tool(
       }
     }
 
+    // Write evidence file if provided, get ref tag
+    let evidencePath: string | undefined;
+    let refTag = "";
+    if (evidence && evidence.trim()) {
+      const evidenceDir = path.join(memoryDir, "evidence");
+      if (!fs.existsSync(evidenceDir)) {
+        fs.mkdirSync(evidenceDir, { recursive: true });
+      }
+      const factId = hashText(content).slice(0, 12);
+      const evidenceFile = path.join(evidenceDir, `${factId}.md`);
+      const evidenceContent = `# Evidence for: ${content}\n\n${evidence}\n`;
+      fs.writeFileSync(evidenceFile, evidenceContent, "utf-8");
+      evidencePath = `memory/evidence/${factId}.md`;
+      refTag = ` [ref:${evidencePath}]`;
+    }
+
     // Write fact to .md file
-    let entry = `- ${content}`;
+    let entry = `- ${content}${refTag}`;
     if (source) {
       entry += ` _(source: ${source})_`;
     }
@@ -367,31 +377,6 @@ server.tool(
     } else {
       fs.appendFileSync(filePath, entry + "\n", "utf-8");
     }
-
-    // Write evidence to evidence/{cat}/ directory if provided
-    let evidencePath: string | undefined;
-    const evidenceChunkIds: string[] = [];
-    if (evidence && evidence.trim()) {
-      const evidenceDir = path.join(memoryDir, "evidence");
-      if (!fs.existsSync(evidenceDir)) {
-        fs.mkdirSync(evidenceDir, { recursive: true });
-      }
-      const factId = hashText(content).slice(0, 12);
-      const evidenceFile = path.join(evidenceDir, `${factId}.md`);
-      const evidenceContent = `# Evidence for: ${content}\n\n${evidence}\n`;
-      fs.writeFileSync(evidenceFile, evidenceContent, "utf-8");
-      evidencePath = `memory/evidence/${factId}.md`;
-    }
-
-    // Insert fact into facts table
-    const now = Date.now();
-    const factId = hashText(content).slice(0, 16);
-    try {
-      db.prepare(
-        `INSERT OR REPLACE INTO facts (id, fact, category, source, evidence_chunk_ids, created_at, last_verified_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run(factId, content, cat, source ?? null, evidencePath ?? null, now, now);
-    } catch {}
 
     // Reset cooldown so the next tool call triggers re-sync
     lastSyncAt = 0;
@@ -414,7 +399,7 @@ server.tool(
 // Shared helper: find a memory entry by string match then semantic search
 // ---------------------------------------------------------------------------
 
-const ENTRY_RE = /^- (.+?)(?:\s+_\(source:.*?\)_)?(?:\s+—\s+\d{4}.*)?$/;
+const ENTRY_RE = /^- (.+?)(?:\s+\[ref:.*?\])?(?:\s+_\(source:.*?\)_)?(?:\s+—\s+\d{4}.*)?$/;
 
 function normalizeForMatch(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim();
@@ -566,12 +551,6 @@ server.tool(
     fs.writeFileSync(match.filePath, lines.join("\n"), "utf-8");
     lastSyncAt = 0;
 
-    // Remove corresponding fact
-    const entryText = match.line.match(ENTRY_RE)?.[1];
-    if (entryText) {
-      try { db.prepare(`DELETE FROM facts WHERE id = ?`).run(hashText(entryText).slice(0, 16)); } catch {}
-    }
-
     const relPath = path.relative(resolveWorkspaceDir(), match.filePath).replace(/\\/g, "/");
     return {
       content: [{
@@ -616,20 +595,6 @@ server.tool(
     lines[match.lineIndex] = newEntry;
     fs.writeFileSync(match.filePath, lines.join("\n"), "utf-8");
     lastSyncAt = 0;
-
-    // Update fact: delete old, insert new
-    const oldText = match.line.match(ENTRY_RE)?.[1];
-    const now = Date.now();
-    if (oldText) {
-      try { db.prepare(`DELETE FROM facts WHERE id = ?`).run(hashText(oldText).slice(0, 16)); } catch {}
-    }
-    const cat = category?.toLowerCase().replace(/[^a-z0-9_-]/g, "-") ?? "general";
-    try {
-      db.prepare(
-        `INSERT OR REPLACE INTO facts (id, fact, category, source, created_at, last_verified_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      ).run(hashText(new_content).slice(0, 16), new_content, cat, source ?? null, now, now);
-    } catch {}
 
     const relPath = path.relative(resolveWorkspaceDir(), match.filePath).replace(/\\/g, "/");
     return {

@@ -17,7 +17,7 @@ async function ensureSqliteVec(): Promise<typeof import("sqlite-vec") | null> {
   return sqliteVec;
 }
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const EMBEDDING_DIMS = 768;
 
 export async function openDatabase(dbPath: string, opts?: { chunkSize?: number }): Promise<Database.Database> {
@@ -227,20 +227,7 @@ function ensureSchema(db: Database.Database, vec: typeof import("sqlite-vec") | 
     );
   `);
 
-  // Structured facts with evidence tracking
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS facts (
-      id TEXT PRIMARY KEY,
-      fact TEXT NOT NULL,
-      category TEXT NOT NULL DEFAULT 'general',
-      source TEXT,
-      evidence_chunk_ids TEXT,
-      created_at INTEGER NOT NULL,
-      last_verified_at INTEGER NOT NULL,
-      access_count INTEGER NOT NULL DEFAULT 0
-    );
-  `);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);`);
+  // facts table removed in schema v8 — facts live in .md files, indexed via chunks
 }
 
 export function isFtsAvailable(db: Database.Database): boolean {

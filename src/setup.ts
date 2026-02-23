@@ -44,6 +44,8 @@ Do NOT write:
 - Ephemeral context: current task details, temporary debugging, one-off commands
 - Generic knowledge not specific to this user
 - Secrets, passwords, API keys, or personal identifiers
+
+When search results show source="sessions", consider: does this contain lasting knowledge? If yes, distill it into a fact via memory_write.
 </memory_write>
 
 <memory_maintenance>
@@ -56,6 +58,8 @@ Stale or contradictory memories are worse than no memories.
 `.trim();
 
 const INSTRUCTIONS_MARKER = "<memory_recall>";
+// Detect old prompt formats for backward compatibility
+const LEGACY_MARKERS = ["## Memory Recall", "## Memory Write", "## Memory Maintenance"];
 
 // ---------------------------------------------------------------------------
 // Target profiles: Copilot CLI vs Claude Code CLI
@@ -201,8 +205,8 @@ function setupInstructions(profile: TargetProfile): { changed: boolean; message:
     content = fs.readFileSync(instrPath, "utf-8");
   } catch {}
 
-  // Idempotent: check if our block already exists
-  if (content.includes(INSTRUCTIONS_MARKER)) {
+  // Idempotent: check if our block already exists (current or legacy format)
+  if (content.includes(INSTRUCTIONS_MARKER) || LEGACY_MARKERS.some((m) => content.includes(m))) {
     return { changed: false, message: "Memory recall instructions already present." };
   }
 
