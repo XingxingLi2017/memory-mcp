@@ -36,6 +36,13 @@ function bm25RankToScore(rank: number): number {
 
 const SNIPPET_MAX_CHARS = 700;
 
+/** Rough chars-to-tokens ratio (conservative for mixed CJK/Latin) */
+const CHARS_PER_TOKEN = 3;
+/** Estimated tokens per result for JSON metadata (path, score, lines, etc.) */
+const METADATA_TOKENS = 30;
+/** Default token budget per search */
+const DEFAULT_TOKEN_MAX = 4096;
+
 type FtsRow = {
   id: string;
   path: string;
@@ -49,6 +56,8 @@ type FtsRow = {
 export type SearchOpts = {
   maxResults?: number;
   minScore?: number;
+  /** Maximum total tokens to return (controls snippet truncation). Default: 2048 */
+  tokenMax?: number;
   /** ISO 8601 timestamp — only include chunks from files modified after this time */
   after?: string;
   /** ISO 8601 timestamp — only include chunks from files modified before this time */
@@ -67,8 +76,12 @@ export async function searchMemory(
   const cleaned = query.trim();
   if (!cleaned) return [];
 
-  const maxResults = opts?.maxResults ?? 6;
+  const tokenMax = opts?.tokenMax ?? DEFAULT_TOKEN_MAX;
+  const maxResults = opts?.maxResults ?? Math.min(20, Math.max(1, Math.floor(tokenMax / (200 + METADATA_TOKENS))));
   const minScore = opts?.minScore ?? 0.01;
+  // Dynamic snippet size based on token budget
+  const snippetTokens = Math.max(50, Math.floor((tokenMax - METADATA_TOKENS * maxResults) / maxResults));
+  const snippetMaxChars = Math.min(SNIPPET_MAX_CHARS, snippetTokens * CHARS_PER_TOKEN);
 
   const allowedPaths = buildTimeFilter(db, opts?.after, opts?.before);
   const pathFilter = (r: SearchResult) => !allowedPaths || allowedPaths.has(r.path);
@@ -98,7 +111,7 @@ export async function searchMemory(
             startLine: row.start_line,
             endLine: row.end_line,
             score: bm25RankToScore(row.rank),
-            snippet: row.text.slice(0, SNIPPET_MAX_CHARS),
+            snippet: row.text.slice(0, snippetMaxChars),
             source: row.source,
           }))
           .filter((r) => r.score >= minScore && pathFilter(r));
@@ -136,7 +149,7 @@ export async function searchMemory(
           startLine: row.start_line,
           endLine: row.end_line,
           score: 1 - row.distance, // cosine distance → similarity
-          snippet: row.text.slice(0, SNIPPET_MAX_CHARS),
+          snippet: row.text.slice(0, snippetMaxChars),
           source: row.source,
         }))
         .filter((r) => r.score >= minScore && pathFilter(r));
@@ -154,7 +167,7 @@ export async function searchMemory(
   } else if (ftsResults.length > 0) {
     results = ftsResults;
   } else {
-    results = searchLike(db, cleaned, maxResults, allowedPaths);
+    results = searchLike(db, cleaned, maxResults, snippetMaxChars, allowedPaths);
   }
 
   results = results.slice(0, maxResults);
@@ -230,6 +243,7 @@ function searchLike(
   db: Database.Database,
   query: string,
   maxResults: number,
+  snippetMaxChars: number,
   allowedPaths?: Set<string> | null,
 ): SearchResult[] {
   const escaped = query.replace(/[%_]/g, "\\$&");
@@ -259,7 +273,7 @@ function searchLike(
       startLine: row.start_line,
       endLine: row.end_line,
       score: 1 / (1 + i),
-      snippet: row.text.slice(0, SNIPPET_MAX_CHARS),
+      snippet: row.text.slice(0, snippetMaxChars),
       source: row.source,
     }));
 }

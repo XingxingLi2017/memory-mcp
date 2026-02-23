@@ -3,7 +3,7 @@ import {
   hashText,
   listMemoryFiles,
   buildFileEntry,
-  chunkMarkdown,
+  chunkFile,
   type MemoryFileEntry,
 } from "./internal.js";
 import { isFtsAvailable, isVecAvailable } from "./db.js";
@@ -23,7 +23,7 @@ export type SyncResult = {
 export async function syncMemoryFiles(
   db: Database.Database,
   workspaceDir: string,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; chunkSize?: number },
 ): Promise<SyncResult> {
   const files = await listMemoryFiles(workspaceDir);
   const entries = await Promise.all(
@@ -45,7 +45,7 @@ export async function syncMemoryFiles(
       continue;
     }
 
-    indexFile(db, entry, ftsOk);
+    indexFile(db, entry, ftsOk, opts?.chunkSize);
     indexed++;
   }
 
@@ -84,9 +84,10 @@ function indexFile(
   db: Database.Database,
   entry: MemoryFileEntry,
   ftsOk: boolean,
+  chunkSize?: number,
 ): void {
   const content = entry.content;
-  const chunks = chunkMarkdown(content).filter((c) => c.text.trim().length > 0);
+  const chunks = chunkFile(content, entry.path, chunkSize).filter((c) => c.text.trim().length > 0);
   const now = Date.now();
 
   // Clear old data for this file

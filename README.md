@@ -8,7 +8,7 @@ Indexes `MEMORY.md` and `memory/` files into a SQLite database with **hybrid sea
 
 - **Hybrid search** — combines BM25 keyword matching with vector cosine similarity for best-of-both-worlds retrieval
 - **CJK support** — jieba-wasm pre-segmentation enables Chinese/Japanese/Korean full-text search
-- **Multi-format** — indexes `.md`, `.txt`, `.json`, `.yaml`, `.yml` files
+- **Multi-format** — indexes `.md`, `.txt`, `.json`, `.jsonl`, `.yaml`, `.yml` files
 - **Graceful degradation** — vector search requires optional native dependencies; falls back to FTS-only if unavailable
 - **Incremental sync** — SHA256-based change detection; unchanged files are skipped
 - **Embedding cache** — content-hash keyed cache avoids re-embedding unchanged text across file moves/renames
@@ -67,7 +67,7 @@ The host CLI will automatically search these files before answering questions ab
 
 1. The host CLI spawns the MCP server on startup (via stdio)
 2. On each search, syncs `MEMORY.md`, `memory.md`, and `memory/` directory
-3. Files are chunked by markdown headings (or as a single chunk for non-markdown)
+3. Files are chunked intelligently by format: markdown by headings, JSON by top-level keys/array elements, JSONL by line, YAML by top-level keys or `---` document separators
 4. Chunks are indexed in **SQLite FTS5** (with jieba pre-segmentation for CJK text)
 5. Chunks are embedded with **embeddinggemma-300M** (768-dim vectors) and stored in **sqlite-vec**
 6. Search runs both FTS5 (BM25 ranking) and vector (cosine similarity) in parallel
@@ -81,6 +81,8 @@ The host CLI will automatically search these files before answering questions ab
 |----------|---------|-------------|
 | `MEMORY_WORKSPACE` | `~/.copilot` | Root directory to scan for memory files |
 | `MEMORY_DB_PATH` | `~/.copilot/memory.db` | Path to SQLite database |
+| `MEMORY_CHUNK_SIZE` | `512` | Chunk size in tokens for markdown splitting (64–4096). Changing triggers automatic index rebuild |
+| `MEMORY_TOKEN_MAX` | `4096` | Default max tokens per search response (100–16384). Controls snippet length and result count |
 
 ## Uninstall
 

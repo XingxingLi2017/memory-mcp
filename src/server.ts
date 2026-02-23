@@ -23,6 +23,24 @@ function resolveDbPath(): string {
   return process.env.MEMORY_DB_PATH ?? path.join(resolveWorkspaceDir(), "memory.db");
 }
 
+function resolveChunkSize(): number {
+  const val = process.env.MEMORY_CHUNK_SIZE;
+  if (val) {
+    const n = Number(val);
+    if (n >= 64 && n <= 4096) return n;
+  }
+  return 512;
+}
+
+function resolveTokenMax(): number {
+  const val = process.env.MEMORY_TOKEN_MAX;
+  if (val) {
+    const n = Number(val);
+    if (n >= 100 && n <= 16384) return n;
+  }
+  return 4096;
+}
+
 const server = new McpServer({
   name: "memory",
   version: "0.1.0",
@@ -41,7 +59,7 @@ async function ensureSynced(): Promise<void> {
   if (now - lastSyncAt < SYNC_COOLDOWN_MS) return;
   const workspaceDir = resolveWorkspaceDir();
   try {
-    await syncMemoryFiles(db, workspaceDir);
+    await syncMemoryFiles(db, workspaceDir, { chunkSize: resolveChunkSize() });
     lastSyncAt = Date.now();
     // Async embedding sync — don't block on it
     syncEmbeddings(db).catch((err) =>
@@ -56,17 +74,19 @@ async function ensureSynced(): Promise<void> {
 
 server.tool(
   "memory_search",
-  "Semantically search MEMORY.md and memory/*.md files (also .txt, .json, .yaml). Use before answering questions about prior work, decisions, preferences, or project context.",
+  "Semantically search MEMORY.md and memory/*.md files (also .txt, .json, .jsonl, .yaml). Use before answering questions about prior work, decisions, preferences, or project context.",
   {
     query: z.string().describe("Search query"),
-    maxResults: z.number().optional().describe("Max results to return (default: 6)"),
+    maxResults: z.number().optional().describe("Max results to return (default: auto-calculated from token budget)"),
     minScore: z.number().optional().describe("Minimum relevance score 0-1 (default: 0.01)"),
+    tokenMax: z.number().optional().describe("Maximum total tokens to return (default: 4096). Controls snippet length and result count."),
     after: z.string().optional().describe("Only include files modified after this ISO 8601 timestamp (filters by file mtime, not individual chunk age)"),
     before: z.string().optional().describe("Only include files modified before this ISO 8601 timestamp (filters by file mtime, not individual chunk age)"),
   },
-  async ({ query, maxResults, minScore, after, before }) => {
+  async ({ query, maxResults, minScore, tokenMax, after, before }) => {
     await ensureSynced();
-    const results = await searchMemory(db, query, { maxResults, minScore, after, before });
+    const effectiveTokenMax = tokenMax ?? resolveTokenMax();
+    const results = await searchMemory(db, query, { maxResults, minScore, tokenMax: effectiveTokenMax, after, before });
     return {
       content: [
         {
@@ -187,6 +207,10 @@ server.tool(
       chunks: chunkCount,
       embeddedChunks: vecCount,
       embeddingCache: cacheCount,
+      config: {
+        chunkSize: resolveChunkSize(),
+        tokenMax: resolveTokenMax(),
+      },
       lastSyncAt: lastSyncAt ? new Date(lastSyncAt).toISOString() : null,
       warnings: warnings.length > 0 ? warnings : undefined,
     };
@@ -199,7 +223,7 @@ server.tool(
 // --- Start ---
 
 async function main() {
-  db = await openDatabase(dbPath);
+  db = await openDatabase(dbPath, { chunkSize: resolveChunkSize() });
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // Initial sync on startup

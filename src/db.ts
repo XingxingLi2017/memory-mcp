@@ -19,7 +19,7 @@ async function ensureSqliteVec(): Promise<typeof import("sqlite-vec") | null> {
 const SCHEMA_VERSION = 6;
 const EMBEDDING_DIMS = 768;
 
-export async function openDatabase(dbPath: string): Promise<Database.Database> {
+export async function openDatabase(dbPath: string, opts?: { chunkSize?: number }): Promise<Database.Database> {
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -39,10 +39,10 @@ export async function openDatabase(dbPath: string): Promise<Database.Database> {
     }
   }
 
-  // Check for schema version mismatch — rebuild if outdated
-  const needsRebuild = checkSchemaVersion(db);
+  // Check for schema version or config mismatch — rebuild if outdated
+  const needsRebuild = checkNeedsRebuild(db, opts?.chunkSize);
   if (needsRebuild) {
-    console.error("[memory-mcp] Schema version changed, rebuilding index (memory files are not affected)");
+    console.error("[memory-mcp] Schema or config changed, rebuilding index (memory files are not affected)");
     db.exec("DROP TABLE IF EXISTS chunks_fts");
     db.exec("DROP TABLE IF EXISTS chunks_vec");
     db.exec("DROP TABLE IF EXISTS embedding_cache");
@@ -51,23 +51,23 @@ export async function openDatabase(dbPath: string): Promise<Database.Database> {
     db.exec("DROP TABLE IF EXISTS meta");
   }
 
-  ensureSchema(db, vec);
+  ensureSchema(db, vec, opts?.chunkSize);
   return db;
 }
 
-function checkSchemaVersion(db: Database.Database): boolean {
+function checkNeedsRebuild(db: Database.Database, chunkSize?: number): boolean {
   try {
-    const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as
-      | { value: string }
-      | undefined;
-    if (!row) return false;
-    return Number(row.value) !== SCHEMA_VERSION;
+    const row = db.prepare("SELECT key, value FROM meta").all() as Array<{ key: string; value: string }>;
+    const meta = Object.fromEntries(row.map((r) => [r.key, r.value]));
+    if (Number(meta.schema_version) !== SCHEMA_VERSION) return true;
+    if (chunkSize && Number(meta.chunk_size) !== chunkSize) return true;
+    return false;
   } catch {
     return false;
   }
 }
 
-function ensureSchema(db: Database.Database, vec: typeof import("sqlite-vec") | null): void {
+function ensureSchema(db: Database.Database, vec: typeof import("sqlite-vec") | null, chunkSize?: number): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -118,10 +118,15 @@ function ensureSchema(db: Database.Database, vec: typeof import("sqlite-vec") | 
     console.error("FTS5 not available:", err);
   }
 
-  // Store schema version
+  // Store schema version and config
   db.prepare(
     `INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`,
   ).run(String(SCHEMA_VERSION));
+  if (chunkSize) {
+    db.prepare(
+      `INSERT OR REPLACE INTO meta (key, value) VALUES ('chunk_size', ?)`,
+    ).run(String(chunkSize));
+  }
 
   // Vector search table (sqlite-vec) — only if extension loaded
   if (vec) {
