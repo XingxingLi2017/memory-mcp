@@ -185,7 +185,58 @@ export async function searchMemory(
 
   results = results.slice(0, maxResults);
   bumpAccessCount(db, results);
-  return applyAccessBoost(db, results);
+  const boosted = applyAccessBoost(db, results);
+
+  // Layered recall: facts (highest priority) → raw chunks
+  const factResults = searchFacts(db, cleaned, maxResults);
+
+  let merged: SearchResult[];
+  const seen = new Set<string>();
+
+  // Layer 1: facts
+  merged = [...factResults];
+  for (const f of merged) seen.add(f.snippet);
+
+  // Layer 2: chunks (with distillation hint for session data)
+  for (const r of boosted) {
+    if (!seen.has(r.snippet.trim())) {
+      // Add hint for raw session chunks to encourage agent distillation
+      if (r.source === "sessions") {
+        r.snippet = r.snippet + "\n[hint: raw session data — consider distilling key learnings into a fact via memory_write]";
+      }
+      merged.push(r);
+    }
+  }
+
+  merged = merged.slice(0, maxResults);
+
+  // Compact snippets for token-efficient injection
+  return merged.map((r) => ({ ...r, snippet: compactSnippet(r.snippet, r.source) }));
+}
+
+/**
+ * Strip metadata noise from snippets to reduce token waste.
+ * Memory entries: remove `- ` prefix, `_(source: ...)_`, `— timestamp`.
+ * Session entries: collapse redundant whitespace.
+ * Facts: return as-is (already compact).
+ */
+function compactSnippet(text: string, source: string): string {
+  if (source === "facts") return text;
+
+  let result = text;
+  if (source === "memory") {
+    // Strip entry metadata per line
+    result = result
+      .split("\n")
+      .map((line) => {
+        const m = line.match(/^- (.+?)(?:\s+_\(source:.*?\)_)?(?:\s+—\s+\d{4}.*)?$/);
+        return m ? m[1]! : line;
+      })
+      .join("\n");
+  }
+  // Collapse 3+ consecutive newlines to 2
+  result = result.replace(/\n{3,}/g, "\n\n");
+  return result.trim();
 }
 
 /**
@@ -363,4 +414,54 @@ function applyAccessBoost(db: Database.Database, results: SearchResult[]): Searc
     console.error("[memory-mcp] applyAccessBoost error:", err);
   }
   return results;
+}
+
+/**
+ * Search the facts table using word overlap scoring.
+ * Facts are compact, high-value entries; matched facts get a priority boost.
+ */
+function searchFacts(
+  db: Database.Database,
+  query: string,
+  maxResults: number,
+): SearchResult[] {
+  try {
+    const rows = db.prepare(`SELECT id, fact, category, access_count FROM facts`).all() as Array<{
+      id: string; fact: string; category: string; access_count: number;
+    }>;
+    if (rows.length === 0) return [];
+
+    const qWords = new Set(
+      query.toLowerCase().replace(/\s+/g, " ").trim().split(" ").filter((w) => w.length > 1),
+    );
+    if (qWords.size === 0) return [];
+
+    const scored = rows
+      .map((row) => {
+        const fWords = row.fact.toLowerCase().replace(/\s+/g, " ").trim().split(" ").filter((w) => w.length > 1);
+        const intersection = fWords.filter((w) => qWords.has(w)).length;
+        const union = new Set([...qWords, ...fWords]).size;
+        const jaccard = union > 0 ? intersection / union : 0;
+        return { row, score: jaccard };
+      })
+      .filter((s) => s.score > 0.15)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, maxResults);
+
+    // Bump access count for matched facts
+    const bumpStmt = db.prepare(`UPDATE facts SET access_count = access_count + 1, last_verified_at = ? WHERE id = ?`);
+    const now = Date.now();
+    for (const s of scored) bumpStmt.run(now, s.row.id);
+
+    return scored.map((s) => ({
+      path: `memory/${s.row.category}.md`,
+      startLine: 0,
+      endLine: 0,
+      score: Math.min(1, s.score * 1.5), // Boost fact scores
+      snippet: s.row.fact,
+      source: "facts",
+    }));
+  } catch {
+    return [];
+  }
 }

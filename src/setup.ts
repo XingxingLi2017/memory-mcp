@@ -10,42 +10,52 @@ const __dirname = path.dirname(__filename);
 const MCP_SERVER_NAME = "memory";
 
 const INSTRUCTIONS_BLOCK = `
-## Memory Recall
-
+<memory_recall>
 Before answering questions about prior work, decisions, dates, people, preferences, project context, or todos:
 
-1. Run \`memory_search\` with a relevant query to check MEMORY.md and memory/*.md files
+1. Run \`memory_search\` with a relevant query to check MEMORY.md and memory/*.md files (also .txt, .json, .jsonl, .yaml)
 2. If results look relevant, use \`memory_get\` to pull only the needed lines
 3. If low confidence after search, say you checked but found nothing relevant
 
 Do not skip the memory search step — it ensures continuity across sessions.
+</memory_recall>
 
-## Memory Write
-
+<memory_write>
 You are building a personal memory of this user. As memories grow, you understand them better and they need to explain less.
-Write proactively when you learn lasting facts about the user — skip ephemeral context.
+Call \`memory_write\` proactively — do not wait for "remember this."
 
-<when_to_write>
-- User reveals how they work: coding style, tools, workflow, naming conventions
+When calling memory_write:
+- \`content\`: one clear fact — what you learned (the compressed knowledge)
+- \`evidence\`: the raw context — conversation excerpt, code snippet, or observation that supports the fact (optional but valuable)
+
+The system auto-chunks evidence and links it to the fact. Search returns facts first; use \`memory_get\` to drill into evidence when needed.
+Think of it as: content = the answer, evidence = the receipts.
+
+Write when:
+- User reveals preferences, coding style, tools, workflow, or naming conventions
 - A decision is made with reasoning worth preserving
-- User corrects you — save it so the mistake never repeats
+- User corrects you — store it so the mistake never repeats
 - Project structure, architecture, or deployment details emerge
 - You discover gotchas, workarounds, or non-obvious patterns
 - User mentions people, teams, or responsibilities
 - Anything that would save the user from re-explaining next session
-</when_to_write>
 
-<how_to_write>
-- One clear statement per call — atomic, not compound
-- Pick a descriptive category: preferences, decisions, project, people, workflow, gotchas
-- Include source when known (e.g. "user said", "observed from code")
-- Never store secrets, passwords, API keys, or personal identifiers
-- Skip generic knowledge — only store what is specific to this user
-- Do NOT store ephemeral context: current task details, temporary debugging, or one-off commands
-</how_to_write>
+Do NOT write:
+- Ephemeral context: current task details, temporary debugging, one-off commands
+- Generic knowledge not specific to this user
+- Secrets, passwords, API keys, or personal identifiers
+</memory_write>
+
+<memory_maintenance>
+Stale or contradictory memories are worse than no memories.
+
+- User corrects a fact → \`memory_update\` to replace it
+- Information becomes obsolete → \`memory_forget\` to remove it
+- Contradiction detected → ask the user, then update or forget
+</memory_maintenance>
 `.trim();
 
-const INSTRUCTIONS_MARKER = "## Memory Recall";
+const INSTRUCTIONS_MARKER = "<memory_recall>";
 
 // ---------------------------------------------------------------------------
 // Target profiles: Copilot CLI vs Claude Code CLI

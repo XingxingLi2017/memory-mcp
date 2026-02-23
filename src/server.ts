@@ -8,7 +8,7 @@ import fs from "node:fs";
 import { openDatabase } from "./db.js";
 import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
-import { MEMORY_EXTENSIONS } from "./internal.js";
+import { MEMORY_EXTENSIONS, hashText } from "./internal.js";
 
 const DEFAULT_WORKSPACE = path.join(
   process.env.HOME ?? process.env.USERPROFILE ?? "~",
@@ -204,6 +204,10 @@ server.tool(
     try {
       cacheCount = (db.prepare(`SELECT COUNT(*) as c FROM embedding_cache`).get() as { c: number }).c;
     } catch {}
+    let factCount = 0;
+    try {
+      factCount = (db.prepare(`SELECT COUNT(*) as c FROM facts`).get() as { c: number }).c;
+    } catch {}
 
     const warnings: string[] = [];
 
@@ -244,6 +248,7 @@ server.tool(
       chunks: chunkCount,
       embeddedChunks: vecCount,
       embeddingCache: cacheCount,
+      facts: factCount,
       config: {
         chunkSize: resolveChunkSize(),
         tokenMax: resolveTokenMax(),
@@ -276,12 +281,15 @@ server.tool(
       .string()
       .optional()
       .describe("Origin of this knowledge (e.g. 'user said', 'observed from code', 'corrected by user')"),
+    evidence: z
+      .string()
+      .optional()
+      .describe("The raw context supporting this fact — conversation excerpt, code snippet, or observation. Auto-chunked and linked for traceability."),
   },
-  async ({ content, category, source }) => {
+  async ({ content, category, source, evidence }) => {
     const workspaceDir = resolveWorkspaceDir();
     const memoryDir = path.join(workspaceDir, "memory");
 
-    // Ensure memory directory exists
     if (!fs.existsSync(memoryDir)) {
       fs.mkdirSync(memoryDir, { recursive: true });
     }
@@ -290,16 +298,15 @@ server.tool(
     const filePath = path.join(memoryDir, `${cat}.md`);
     const timestamp = new Date().toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
 
-    // Deduplicate: check if file already contains similar content
+    // Deduplicate: exact string match
     if (fs.existsSync(filePath)) {
       const existing = fs.readFileSync(filePath, "utf-8");
       const normalized = content.toLowerCase().replace(/\s+/g, " ").trim();
       const lines = existing.split("\n");
       for (const line of lines) {
-        // Extract the text part of each entry (strip "- ", source, timestamp)
-        const match = line.match(/^- (.+?)(?:\s+_\(source:.*?\)_)?(?:\s+—\s+\d{4}.*)?$/);
+        const match = line.match(ENTRY_RE);
         if (match) {
-          const existingNorm = match[1].toLowerCase().replace(/\s+/g, " ").trim();
+          const existingNorm = normalizeForMatch(match[1]!);
           if (existingNorm === normalized) {
             return {
               content: [
@@ -314,14 +321,46 @@ server.tool(
       }
     }
 
-    // Build entry
+    // Semantic dedup: best-effort check (respects cooldown)
+    await ensureSynced();
+    const similar = await searchMemory(db, content, { maxResults: 3, minScore: 0.3 });
+    const memHits = similar.filter((r) => r.source === "memory" || r.source === "facts");
+    if (memHits.length > 0) {
+      const queryWords = contentWords(content);
+      for (const hit of memHits) {
+        const snippetLines = hit.snippet.split("\n").filter((l) => l.trim().length > 0);
+        for (const sLine of snippetLines) {
+          const lineWords = contentWords(sLine);
+          if (lineWords.size < 2) continue;
+          const intersection = [...queryWords].filter((w) => lineWords.has(w)).length;
+          const smaller = Math.min(queryWords.size, lineWords.size);
+          const overlapRatio = smaller > 0 ? intersection / smaller : 0;
+          if (hit.score > 0.6 && overlapRatio > 0.5) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify({
+                    stored: false,
+                    reason: "semantic_duplicate",
+                    similarEntry: sLine.trim(),
+                    path: hit.path,
+                  }),
+                },
+              ],
+            };
+          }
+        }
+      }
+    }
+
+    // Write fact to .md file
     let entry = `- ${content}`;
     if (source) {
       entry += ` _(source: ${source})_`;
     }
     entry += ` — ${timestamp}`;
 
-    // Append to file (create with header if new)
     if (!fs.existsSync(filePath)) {
       const header = `# ${cat.charAt(0).toUpperCase() + cat.slice(1)}\n\n`;
       fs.writeFileSync(filePath, header + entry + "\n", "utf-8");
@@ -329,17 +368,275 @@ server.tool(
       fs.appendFileSync(filePath, entry + "\n", "utf-8");
     }
 
-    // Force re-sync so the new memory is immediately searchable
+    // Write evidence to evidence/{cat}/ directory if provided
+    let evidencePath: string | undefined;
+    const evidenceChunkIds: string[] = [];
+    if (evidence && evidence.trim()) {
+      const evidenceDir = path.join(memoryDir, "evidence");
+      if (!fs.existsSync(evidenceDir)) {
+        fs.mkdirSync(evidenceDir, { recursive: true });
+      }
+      const factId = hashText(content).slice(0, 12);
+      const evidenceFile = path.join(evidenceDir, `${factId}.md`);
+      const evidenceContent = `# Evidence for: ${content}\n\n${evidence}\n`;
+      fs.writeFileSync(evidenceFile, evidenceContent, "utf-8");
+      evidencePath = `memory/evidence/${factId}.md`;
+    }
+
+    // Insert fact into facts table
+    const now = Date.now();
+    const factId = hashText(content).slice(0, 16);
+    try {
+      db.prepare(
+        `INSERT OR REPLACE INTO facts (id, fact, category, source, evidence_chunk_ids, created_at, last_verified_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(factId, content, cat, source ?? null, evidencePath ?? null, now, now);
+    } catch {}
+
+    // Reset cooldown so the next tool call triggers re-sync
     lastSyncAt = 0;
 
     const relPath = `memory/${cat}.md`;
+    const result: Record<string, unknown> = { stored: true, path: relPath, fact: content };
+    if (evidencePath) result.evidencePath = evidencePath;
     return {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify({ stored: true, path: relPath, content }),
+          text: JSON.stringify(result),
         },
       ],
+    };
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Shared helper: find a memory entry by string match then semantic search
+// ---------------------------------------------------------------------------
+
+const ENTRY_RE = /^- (.+?)(?:\s+_\(source:.*?\)_)?(?:\s+—\s+\d{4}.*)?$/;
+
+function normalizeForMatch(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/** Collect all memory file paths (for string-match scan). */
+function listMemoryTargets(workspaceDir: string, category?: string): string[] {
+  const memoryDir = path.join(workspaceDir, "memory");
+  if (category) {
+    const cat = category.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+    const fp = path.join(memoryDir, `${cat}.md`);
+    return fs.existsSync(fp) ? [fp] : [];
+  }
+  const targets: string[] = [];
+  for (const name of ["MEMORY.md", "memory.md", "MEMORY.txt", "memory.txt"]) {
+    const p = path.join(workspaceDir, name);
+    if (fs.existsSync(p)) targets.push(p);
+  }
+  if (fs.existsSync(memoryDir)) {
+    for (const f of fs.readdirSync(memoryDir)) {
+      if (MEMORY_EXTENSIONS.has(path.extname(f).toLowerCase())) {
+        targets.push(path.join(memoryDir, f));
+      }
+    }
+  }
+  return targets;
+}
+
+/** Try to find a `- ` entry line by exact/substring string match. */
+function stringMatchEntry(
+  targets: string[],
+  normalized: string,
+): { filePath: string; lineIndex: number; line: string } | null {
+  for (const fp of targets) {
+    const content = fs.readFileSync(fp, "utf-8");
+    const lines = content.split("\n");
+    const idx = lines.findIndex((line) => {
+      const m = line.match(ENTRY_RE);
+      if (!m) return false;
+      const lineNorm = normalizeForMatch(m[1]!);
+      return lineNorm === normalized || lineNorm.includes(normalized) || normalized.includes(lineNorm);
+    });
+    if (idx !== -1) return { filePath: fp, lineIndex: idx, line: lines[idx]! };
+  }
+  return null;
+}
+
+/** Pick the best `- ` entry within a line range by word overlap with the query. */
+function pickBestEntry(
+  allLines: string[],
+  startLine: number,
+  endLine: number,
+  queryNorm: string,
+): { idx: number; text: string } | null {
+  const entries: Array<{ idx: number; text: string; norm: string }> = [];
+  const s = Math.max(0, startLine - 1);
+  const e = Math.min(allLines.length, endLine);
+  for (let i = s; i < e; i++) {
+    const m = allLines[i]!.match(ENTRY_RE);
+    if (m) entries.push({ idx: i, text: allLines[i]!, norm: normalizeForMatch(m[1]!) });
+  }
+  if (entries.length === 0) return null;
+  if (entries.length === 1) return { idx: entries[0]!.idx, text: entries[0]!.text };
+
+  // Multiple entries: pick best by word overlap
+  const queryWords = new Set(queryNorm.split(" "));
+  let best = entries[0]!;
+  let bestScore = 0;
+  for (const entry of entries) {
+    const words = entry.norm.split(" ");
+    const overlap = words.filter((w) => queryWords.has(w)).length;
+    if (overlap > bestScore) {
+      bestScore = overlap;
+      best = entry;
+    }
+  }
+  return { idx: best.idx, text: best.text };
+}
+
+/**
+ * Find a memory entry: string match first (fast), then semantic search fallback.
+ * Returns the file path, line index, and full line text of the best match.
+ */
+async function findMemoryEntry(
+  query: string,
+  category?: string,
+): Promise<{ filePath: string; lineIndex: number; line: string } | null> {
+  const workspaceDir = resolveWorkspaceDir();
+  const normalized = normalizeForMatch(query);
+  if (!normalized) return null;
+
+  const targets = listMemoryTargets(workspaceDir, category);
+
+  // Phase 1: fast string match
+  const strMatch = stringMatchEntry(targets, normalized);
+  if (strMatch) return strMatch;
+
+  // Phase 2: semantic search fallback
+  await ensureSynced();
+  const results = await searchMemory(db, query, { maxResults: 5, minScore: 0.3 });
+  const memoryResults = results.filter((r) => r.source === "memory");
+  if (memoryResults.length === 0) return null;
+
+  for (const result of memoryResults) {
+    const absPath = path.resolve(workspaceDir, result.path);
+    if (!fs.existsSync(absPath)) continue;
+    const content = fs.readFileSync(absPath, "utf-8");
+    const allLines = content.split("\n");
+    const entry = pickBestEntry(allLines, result.startLine, result.endLine, normalized);
+    if (entry) return { filePath: absPath, lineIndex: entry.idx, line: entry.text };
+  }
+
+  return null;
+}
+
+/** Extract content words for overlap comparison (strips punctuation). */
+function contentWords(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff\s-]/g, " ").replace(/\s+/g, " ").trim()
+      .split(" ").filter((w) => w.length > 1),
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "memory_forget",
+  "Remove a memory entry that is outdated, incorrect, or no longer relevant. " +
+    "Use when the user corrects a previous statement, or when stored information contradicts newer facts.",
+  {
+    content: z.string().describe("Describe the memory to remove — matched semantically, not just by exact text"),
+    category: z
+      .string()
+      .optional()
+      .describe("Category file to search in (e.g. 'preferences'). If omitted, searches all memory files."),
+  },
+  async ({ content, category }) => {
+    await ensureSynced();
+    const match = await findMemoryEntry(content, category);
+    if (!match) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ removed: false, reason: "no matching entry found" }) }],
+      };
+    }
+
+    const fileContent = fs.readFileSync(match.filePath, "utf-8");
+    const lines = fileContent.split("\n");
+    lines.splice(match.lineIndex, 1);
+    fs.writeFileSync(match.filePath, lines.join("\n"), "utf-8");
+    lastSyncAt = 0;
+
+    // Remove corresponding fact
+    const entryText = match.line.match(ENTRY_RE)?.[1];
+    if (entryText) {
+      try { db.prepare(`DELETE FROM facts WHERE id = ?`).run(hashText(entryText).slice(0, 16)); } catch {}
+    }
+
+    const relPath = path.relative(resolveWorkspaceDir(), match.filePath).replace(/\\/g, "/");
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ removed: true, path: relPath, removedContent: match.line }),
+      }],
+    };
+  },
+);
+
+server.tool(
+  "memory_update",
+  "Update an existing memory entry with new content. " +
+    "Use when information has changed (e.g. user changed preferences) or to refine a vague memory into a precise one.",
+  {
+    old_content: z.string().describe("Describe the memory to update — matched semantically, not just by exact text"),
+    new_content: z.string().describe("The replacement content"),
+    category: z
+      .string()
+      .optional()
+      .describe("Category file to search in (e.g. 'preferences'). If omitted, searches all memory files."),
+    source: z
+      .string()
+      .optional()
+      .describe("Origin of the updated knowledge (e.g. 'user corrected', 'observed change')"),
+  },
+  async ({ old_content, new_content, category, source }) => {
+    await ensureSynced();
+    const match = await findMemoryEntry(old_content, category);
+    if (!match) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ updated: false, reason: "no matching entry found" }) }],
+      };
+    }
+
+    const fileContent = fs.readFileSync(match.filePath, "utf-8");
+    const lines = fileContent.split("\n");
+    const timestamp = new Date().toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+    let newEntry = `- ${new_content}`;
+    if (source) newEntry += ` _(source: ${source})_`;
+    newEntry += ` — ${timestamp}`;
+    lines[match.lineIndex] = newEntry;
+    fs.writeFileSync(match.filePath, lines.join("\n"), "utf-8");
+    lastSyncAt = 0;
+
+    // Update fact: delete old, insert new
+    const oldText = match.line.match(ENTRY_RE)?.[1];
+    const now = Date.now();
+    if (oldText) {
+      try { db.prepare(`DELETE FROM facts WHERE id = ?`).run(hashText(oldText).slice(0, 16)); } catch {}
+    }
+    const cat = category?.toLowerCase().replace(/[^a-z0-9_-]/g, "-") ?? "general";
+    try {
+      db.prepare(
+        `INSERT OR REPLACE INTO facts (id, fact, category, source, created_at, last_verified_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(hashText(new_content).slice(0, 16), new_content, cat, source ?? null, now, now);
+    } catch {}
+
+    const relPath = path.relative(resolveWorkspaceDir(), match.filePath).replace(/\\/g, "/");
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ updated: true, path: relPath, old: match.line, new: newEntry }),
+      }],
     };
   },
 );
