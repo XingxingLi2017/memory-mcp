@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
-import { isFtsAvailable } from "./db.js";
+import { isFtsAvailable, isVecAvailable } from "./db.js";
 import { segmentQuery } from "./segment.js";
+import { embedText, vectorToBuffer } from "./embedding.js";
 
 export type SearchResult = {
   path: string;
@@ -55,68 +56,144 @@ export type SearchOpts = {
 };
 
 /**
- * Search memory chunks using FTS5 full-text search.
+ * Search memory chunks using hybrid search (BM25 + vector similarity).
+ * Falls back to FTS-only or LIKE if vector search is unavailable.
  */
-export function searchMemory(
+export async function searchMemory(
   db: Database.Database,
   query: string,
   opts?: SearchOpts,
-): SearchResult[] {
+): Promise<SearchResult[]> {
   const cleaned = query.trim();
   if (!cleaned) return [];
 
   const maxResults = opts?.maxResults ?? 6;
   const minScore = opts?.minScore ?? 0.01;
 
-  // Build set of allowed paths based on time filters
   const allowedPaths = buildTimeFilter(db, opts?.after, opts?.before);
   const pathFilter = (r: SearchResult) => !allowedPaths || allowedPaths.has(r.path);
 
-  if (!isFtsAvailable(db)) {
-    const results = searchLike(db, cleaned, maxResults, allowedPaths);
-    bumpAccessCount(db, results);
-    return applyAccessBoost(db, results);
+  const ftsOk = isFtsAvailable(db);
+  const vecOk = isVecAvailable(db);
+
+  // FTS search
+  let ftsResults: SearchResult[] = [];
+  if (ftsOk) {
+    const ftsQuery = buildFtsQuery(cleaned);
+    if (ftsQuery) {
+      try {
+        const rows = db
+          .prepare(
+            `SELECT f.id, f.path, f.source, f.start_line, f.end_line, c.text, f.rank
+             FROM chunks_fts f
+             JOIN chunks c ON c.id = f.id
+             WHERE chunks_fts MATCH ?
+             ORDER BY f.rank
+             LIMIT ?`,
+          )
+          .all(ftsQuery, maxResults * 3) as FtsRow[];
+        ftsResults = rows
+          .map((row) => ({
+            path: row.path,
+            startLine: row.start_line,
+            endLine: row.end_line,
+            score: bm25RankToScore(row.rank),
+            snippet: row.text.slice(0, SNIPPET_MAX_CHARS),
+            source: row.source,
+          }))
+          .filter((r) => r.score >= minScore && pathFilter(r));
+      } catch {}
+    }
   }
 
-  const ftsQuery = buildFtsQuery(cleaned);
-  if (!ftsQuery) {
-    const results = searchLike(db, cleaned, maxResults, allowedPaths);
-    bumpAccessCount(db, results);
-    return applyAccessBoost(db, results);
+  // Vector search
+  let vecResults: SearchResult[] = [];
+  if (vecOk) {
+    try {
+      const queryVec = await embedText(cleaned);
+      const queryBuf = vectorToBuffer(queryVec);
+      const vecRows = db
+        .prepare(
+          `SELECT v.id, v.distance, c.path, c.source, c.start_line, c.end_line, c.text
+           FROM chunks_vec v
+           JOIN chunks c ON c.id = v.id
+           WHERE embedding MATCH ?
+           ORDER BY distance
+           LIMIT ?`,
+        )
+        .all(queryBuf, maxResults * 3) as Array<{
+        id: string;
+        distance: number;
+        path: string;
+        source: string;
+        start_line: number;
+        end_line: number;
+        text: string;
+      }>;
+      vecResults = vecRows
+        .map((row) => ({
+          path: row.path,
+          startLine: row.start_line,
+          endLine: row.end_line,
+          score: 1 - row.distance, // cosine distance → similarity
+          snippet: row.text.slice(0, SNIPPET_MAX_CHARS),
+          source: row.source,
+        }))
+        .filter((r) => r.score >= minScore && pathFilter(r));
+    } catch (err) {
+      console.error("[memory-mcp] vector search error:", err);
+    }
   }
 
-  const stmt = db.prepare(
-    `SELECT f.id, f.path, f.source, f.start_line, f.end_line, c.text, f.rank
-     FROM chunks_fts f
-     JOIN chunks c ON c.id = f.id
-     WHERE chunks_fts MATCH ?
-     ORDER BY f.rank
-     LIMIT ?`,
-  );
-
-  const toResult = (row: FtsRow): SearchResult => ({
-    path: row.path,
-    startLine: row.start_line,
-    endLine: row.end_line,
-    score: bm25RankToScore(row.rank),
-    snippet: row.text.slice(0, SNIPPET_MAX_CHARS),
-    source: row.source,
-  });
-
-  try {
-    const rows = stmt.all(ftsQuery, maxResults * 3) as FtsRow[];
-    const results = rows
-      .map(toResult)
-      .filter((r) => r.score >= minScore && pathFilter(r))
-      .slice(0, maxResults);
-
-    bumpAccessCount(db, results);
-    return applyAccessBoost(db, results);
-  } catch {
-    const results = searchLike(db, cleaned, maxResults, allowedPaths);
-    bumpAccessCount(db, results);
-    return applyAccessBoost(db, results);
+  // Hybrid merge or single-source
+  let results: SearchResult[];
+  if (ftsResults.length > 0 && vecResults.length > 0) {
+    results = mergeHybrid(ftsResults, vecResults, 0.3, 0.7);
+  } else if (vecResults.length > 0) {
+    results = vecResults;
+  } else if (ftsResults.length > 0) {
+    results = ftsResults;
+  } else {
+    results = searchLike(db, cleaned, maxResults, allowedPaths);
   }
+
+  results = results.slice(0, maxResults);
+  bumpAccessCount(db, results);
+  return applyAccessBoost(db, results);
+}
+
+/**
+ * Merge FTS and vector search results with weighted scoring.
+ * score = α * bm25_score + β * vector_score
+ */
+function mergeHybrid(
+  ftsResults: SearchResult[],
+  vecResults: SearchResult[],
+  ftsWeight: number,
+  vecWeight: number,
+): SearchResult[] {
+  const byKey = new Map<string, { ftsScore: number; vecScore: number; result: SearchResult }>();
+
+  for (const r of ftsResults) {
+    const key = `${r.path}:${r.startLine}`;
+    byKey.set(key, { ftsScore: r.score, vecScore: 0, result: r });
+  }
+  for (const r of vecResults) {
+    const key = `${r.path}:${r.startLine}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.vecScore = r.score;
+    } else {
+      byKey.set(key, { ftsScore: 0, vecScore: r.score, result: r });
+    }
+  }
+
+  return Array.from(byKey.values())
+    .map(({ ftsScore, vecScore, result }) => ({
+      ...result,
+      score: ftsWeight * ftsScore + vecWeight * vecScore,
+    }))
+    .sort((a, b) => b.score - a.score);
 }
 
 /**

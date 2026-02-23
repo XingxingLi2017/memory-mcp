@@ -2,7 +2,15 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
 
-const SCHEMA_VERSION = 4;
+let sqliteVec: typeof import("sqlite-vec") | null = null;
+try {
+  sqliteVec = await import("sqlite-vec");
+} catch {
+  // sqlite-vec not installed — vector search will be disabled
+}
+
+const SCHEMA_VERSION = 6;
+const EMBEDDING_DIMS = 768;
 
 export function openDatabase(dbPath: string): Database.Database {
   const dir = path.dirname(dbPath);
@@ -14,11 +22,22 @@ export function openDatabase(dbPath: string): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
 
+  // Load sqlite-vec extension (if available)
+  if (sqliteVec) {
+    try {
+      sqliteVec.load(db);
+    } catch (err) {
+      console.error("[memory-mcp] sqlite-vec load failed:", err);
+    }
+  }
+
   // Check for schema version mismatch — rebuild if outdated
   const needsRebuild = checkSchemaVersion(db);
   if (needsRebuild) {
     console.error("[memory-mcp] Schema version changed, rebuilding index (memory files are not affected)");
     db.exec("DROP TABLE IF EXISTS chunks_fts");
+    db.exec("DROP TABLE IF EXISTS chunks_vec");
+    db.exec("DROP TABLE IF EXISTS embedding_cache");
     db.exec("DROP TABLE IF EXISTS chunks");
     db.exec("DROP TABLE IF EXISTS files");
     db.exec("DROP TABLE IF EXISTS meta");
@@ -95,11 +114,43 @@ function ensureSchema(db: Database.Database): void {
   db.prepare(
     `INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`,
   ).run(String(SCHEMA_VERSION));
+
+  // Vector search table (sqlite-vec) — only if extension loaded
+  if (sqliteVec) {
+    try {
+      db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
+          id TEXT PRIMARY KEY,
+          embedding float[${EMBEDDING_DIMS}] distance_metric=cosine
+        );
+      `);
+    } catch (err) {
+      console.error("sqlite-vec table creation failed:", err);
+    }
+  }
+
+  // Embedding cache (avoid re-embedding unchanged content)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS embedding_cache (
+      hash TEXT PRIMARY KEY,
+      embedding BLOB NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
 }
 
 export function isFtsAvailable(db: Database.Database): boolean {
   try {
     db.prepare(`SELECT COUNT(*) FROM chunks_fts`).get();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isVecAvailable(db: Database.Database): boolean {
+  try {
+    db.prepare(`SELECT COUNT(*) FROM chunks_vec`).get();
     return true;
   } catch {
     return false;

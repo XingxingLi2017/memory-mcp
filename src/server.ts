@@ -6,7 +6,7 @@ import { z } from "zod";
 import path from "node:path";
 import fs from "node:fs";
 import { openDatabase } from "./db.js";
-import { syncMemoryFiles } from "./sync.js";
+import { syncMemoryFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
 import { MEMORY_EXTENSIONS } from "./internal.js";
 
@@ -43,6 +43,10 @@ async function ensureSynced(): Promise<void> {
   try {
     await syncMemoryFiles(db, workspaceDir);
     lastSyncAt = Date.now();
+    // Async embedding sync — don't block on it
+    syncEmbeddings(db).catch((err) =>
+      console.error("[memory-mcp] embedding sync error:", err),
+    );
   } catch (err) {
     console.error("memory sync error:", err);
   }
@@ -62,7 +66,7 @@ server.tool(
   },
   async ({ query, maxResults, minScore, after, before }) => {
     await ensureSynced();
-    const results = searchMemory(db, query, { maxResults, minScore, after, before });
+    const results = await searchMemory(db, query, { maxResults, minScore, after, before });
     return {
       content: [
         {
@@ -137,6 +141,14 @@ server.tool(
     const workspaceDir = resolveWorkspaceDir();
     const fileCount = (db.prepare(`SELECT COUNT(*) as c FROM files`).get() as { c: number }).c;
     const chunkCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks`).get() as { c: number }).c;
+    let vecCount = 0;
+    try {
+      vecCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks_vec`).get() as { c: number }).c;
+    } catch {}
+    let cacheCount = 0;
+    try {
+      cacheCount = (db.prepare(`SELECT COUNT(*) as c FROM embedding_cache`).get() as { c: number }).c;
+    } catch {}
 
     const warnings: string[] = [];
 
@@ -173,6 +185,8 @@ server.tool(
       dbPath,
       files: fileCount,
       chunks: chunkCount,
+      embeddedChunks: vecCount,
+      embeddingCache: cacheCount,
       lastSyncAt: lastSyncAt ? new Date(lastSyncAt).toISOString() : null,
       warnings: warnings.length > 0 ? warnings : undefined,
     };
