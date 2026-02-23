@@ -525,6 +525,16 @@ function contentWords(text: string): Set<string> {
 
 // ---------------------------------------------------------------------------
 
+const REF_RE = /\[ref:(memory\/evidence\/[^\]]+)\]/;
+
+/** Delete the evidence file referenced in a memory entry line. */
+function cleanupEvidence(line: string): void {
+  const m = line.match(REF_RE);
+  if (!m) return;
+  const absPath = path.join(resolveWorkspaceDir(), m[1]!);
+  try { fs.unlinkSync(absPath); } catch {}
+}
+
 server.tool(
   "memory_forget",
   "Remove a memory entry that is outdated, incorrect, or no longer relevant. " +
@@ -551,6 +561,9 @@ server.tool(
     fs.writeFileSync(match.filePath, lines.join("\n"), "utf-8");
     lastSyncAt = 0;
 
+    // Clean up orphan evidence file
+    cleanupEvidence(match.line);
+
     const relPath = path.relative(resolveWorkspaceDir(), match.filePath).replace(/\\/g, "/");
     return {
       content: [{
@@ -576,8 +589,12 @@ server.tool(
       .string()
       .optional()
       .describe("Origin of the updated knowledge (e.g. 'user corrected', 'observed change')"),
+    evidence: z
+      .string()
+      .optional()
+      .describe("New supporting context for the updated fact. Replaces old evidence if present."),
   },
-  async ({ old_content, new_content, category, source }) => {
+  async ({ old_content, new_content, category, source, evidence }) => {
     await ensureSynced();
     const match = await findMemoryEntry(old_content, category);
     if (!match) {
@@ -586,10 +603,30 @@ server.tool(
       };
     }
 
+    // Clean up old evidence file
+    cleanupEvidence(match.line);
+
+    // Write new evidence if provided
+    let evidencePath: string | undefined;
+    let refTag = "";
+    if (evidence && evidence.trim()) {
+      const memoryDir = path.join(resolveWorkspaceDir(), "memory");
+      const evidenceDir = path.join(memoryDir, "evidence");
+      if (!fs.existsSync(evidenceDir)) {
+        fs.mkdirSync(evidenceDir, { recursive: true });
+      }
+      const factId = hashText(new_content).slice(0, 12);
+      const evidenceFile = path.join(evidenceDir, `${factId}.md`);
+      const evidenceContent = `# Evidence for: ${new_content}\n\n${evidence}\n`;
+      fs.writeFileSync(evidenceFile, evidenceContent, "utf-8");
+      evidencePath = `memory/evidence/${factId}.md`;
+      refTag = ` [ref:${evidencePath}]`;
+    }
+
     const fileContent = fs.readFileSync(match.filePath, "utf-8");
     const lines = fileContent.split("\n");
     const timestamp = new Date().toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
-    let newEntry = `- ${new_content}`;
+    let newEntry = `- ${new_content}${refTag}`;
     if (source) newEntry += ` _(source: ${source})_`;
     newEntry += ` — ${timestamp}`;
     lines[match.lineIndex] = newEntry;
@@ -597,10 +634,12 @@ server.tool(
     lastSyncAt = 0;
 
     const relPath = path.relative(resolveWorkspaceDir(), match.filePath).replace(/\\/g, "/");
+    const result: Record<string, unknown> = { updated: true, path: relPath, old: match.line, new: newEntry };
+    if (evidencePath) result.evidencePath = evidencePath;
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({ updated: true, path: relPath, old: match.line, new: newEntry }),
+        text: JSON.stringify(result),
       }],
     };
   },

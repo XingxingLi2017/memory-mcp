@@ -45,7 +45,7 @@ Do NOT write:
 - Generic knowledge not specific to this user
 - Secrets, passwords, API keys, or personal identifiers
 
-When search results show source="sessions", consider: does this contain lasting knowledge? If yes, distill it into a fact via memory_write.
+When search results include \`distillHint: true\`, the data is raw session history — consider distilling key learnings into a fact via memory_write.
 </memory_write>
 
 <memory_maintenance>
