@@ -7,6 +7,7 @@ import {
   type MemoryFileEntry,
 } from "./internal.js";
 import { isFtsAvailable } from "./db.js";
+import { segmentText } from "./segment.js";
 
 export type SyncResult = {
   indexed: number;
@@ -101,7 +102,7 @@ function indexFile(
     for (const chunk of chunks) {
       const id = hashText(`memory:${entry.path}:${chunk.startLine}:${chunk.endLine}:${chunk.hash}`);
       insertChunk.run(id, entry.path, "memory", chunk.startLine, chunk.endLine, chunk.hash, chunk.text, now);
-      insertFts?.run(chunk.text, id, entry.path, "memory", chunk.startLine, chunk.endLine);
+      insertFts?.run(segmentText(chunk.text), id, entry.path, "memory", chunk.startLine, chunk.endLine);
     }
 
     // Upsert file record

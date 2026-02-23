@@ -36,6 +36,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "better-sqlite3": "^11.8.1",
+    "jieba-wasm": "^2.4.0",
     "zod": "^3.25.0"
   },
   "devDependencies": {

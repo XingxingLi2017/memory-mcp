@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { isFtsAvailable } from "./db.js";
+import { segmentQuery } from "./segment.js";
 
 export type SearchResult = {
   path: string;
@@ -11,35 +12,14 @@ export type SearchResult = {
 };
 
 /**
- * FTS5 query expressions returned by buildFtsQueries.
- * - nearExpr: NEAR query for CJK phrase matching (null if no CJK multi-char)
- * - orExpr: OR query for broad recall (always present)
+ * Build an FTS5 match expression from a raw query string.
+ * Uses jieba segmentation for CJK, word splitting for Latin.
+ * Returns null if no valid tokens found (caller should use LIKE fallback).
  */
-type FtsQueries = { nearExpr: string | null; orExpr: string };
-
-/**
- * Build FTS5 match expressions from a raw query string.
- * With trigram tokenizer, both CJK substrings (≥3 chars) and Latin words work directly.
- * Returns separate NEAR (precision) and OR (recall) expressions for CJK.
- */
-function buildFtsQueries(raw: string): FtsQueries | null {
-  const latinTokens: string[] = [];
-  const latinWords = raw.match(/[A-Za-z0-9_]+/g);
-  if (latinWords) latinTokens.push(...latinWords);
-
-  // Extract CJK runs (contiguous sequences, not single chars)
-  const cjkRuns = raw.match(/[\u4e00-\u9fff\u3400-\u4dbf]{3,}/g) ?? [];
-  // Also extract 2-char CJK that trigram can't match, for LIKE fallback later
-  const cjkShort = raw.match(/[\u4e00-\u9fff\u3400-\u4dbf]{2}/g) ?? [];
-
-  const allTokens = [...latinTokens, ...cjkRuns].filter(Boolean);
-  if (allTokens.length === 0 && cjkShort.length === 0) return null;
-
-  // If we only have short CJK (<3 chars), return null to trigger LIKE fallback
-  if (allTokens.length === 0) return null;
-
-  const orExpr = allTokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" OR ");
-  return { nearExpr: null, orExpr };
+function buildFtsQuery(raw: string): string | null {
+  const tokens = segmentQuery(raw).filter((t) => t.trim().length > 0);
+  if (tokens.length === 0) return null;
+  return tokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" OR ");
 }
 
 /**
@@ -50,8 +30,6 @@ function bm25RankToScore(rank: number): number {
   if (!Number.isFinite(rank)) return 0;
   const absRank = Math.abs(rank);
   if (absRank === 0) return 0;
-  // Normalize: absRank is typically very small (1e-6 range),
-  // so use log scale to spread scores between 0 and 1
   return Math.min(1, Math.max(0, 1 + Math.log10(absRank) / 10));
 }
 
@@ -100,18 +78,19 @@ export function searchMemory(
     return applyAccessBoost(db, results);
   }
 
-  const queries = buildFtsQueries(cleaned);
-  if (!queries) {
+  const ftsQuery = buildFtsQuery(cleaned);
+  if (!ftsQuery) {
     const results = searchLike(db, cleaned, maxResults, allowedPaths);
     bumpAccessCount(db, results);
     return applyAccessBoost(db, results);
   }
 
   const stmt = db.prepare(
-    `SELECT id, path, source, start_line, end_line, text, rank
-     FROM chunks_fts
+    `SELECT f.id, f.path, f.source, f.start_line, f.end_line, c.text, f.rank
+     FROM chunks_fts f
+     JOIN chunks c ON c.id = f.id
      WHERE chunks_fts MATCH ?
-     ORDER BY rank
+     ORDER BY f.rank
      LIMIT ?`,
   );
 
@@ -125,28 +104,11 @@ export function searchMemory(
   });
 
   try {
-    // Step 1: NEAR query for CJK precision (if available)
-    let results: SearchResult[] = [];
-    if (queries.nearExpr) {
-      const nearRows = stmt.all(queries.nearExpr, maxResults * 3) as FtsRow[];
-      results = nearRows.map(toResult).filter((r) => r.score >= minScore && pathFilter(r)).slice(0, maxResults);
-    }
-
-    // Step 2: OR fallback if NEAR didn't fill maxResults
-    if (results.length < maxResults) {
-      const orRows = stmt.all(queries.orExpr, maxResults * 3) as FtsRow[];
-      const seenIds = new Set(results.map((r) => `${r.path}:${r.startLine}`));
-      for (const row of orRows) {
-        const key = `${row.path}:${row.start_line}`;
-        if (seenIds.has(key)) continue;
-        const mapped = toResult(row);
-        if (mapped.score >= minScore && pathFilter(mapped)) {
-          results.push(mapped);
-          seenIds.add(key);
-          if (results.length >= maxResults) break;
-        }
-      }
-    }
+    const rows = stmt.all(ftsQuery, maxResults * 3) as FtsRow[];
+    const results = rows
+      .map(toResult)
+      .filter((r) => r.score >= minScore && pathFilter(r))
+      .slice(0, maxResults);
 
     bumpAccessCount(db, results);
     return applyAccessBoost(db, results);
