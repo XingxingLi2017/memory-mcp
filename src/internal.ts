@@ -156,18 +156,25 @@ export function chunkJson(content: string): MemoryChunk[] {
   const keys = Object.keys(parsed);
   if (keys.length === 0) return singleChunk(content, lines);
 
-  // Find each top-level key's line range by searching for the key in the source
+  // Find each top-level key's line position using brace depth tracking (single pass)
   const chunks: MemoryChunk[] = [];
   const keyPositions: Array<{ key: string; startLine: number }> = [];
+  const keySet = new Set(keys);
+  let depth = 0;
 
-  for (const key of keys) {
-    // Match "key": at start of trimmed line
-    const pattern = new RegExp(`^\\s*"${escapeRegex(key)}"\\s*:`);
-    for (let i = 0; i < lines.length; i++) {
-      if (pattern.test(lines[i]!)) {
-        keyPositions.push({ key, startLine: i });
-        break;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    // At depth 1 (inside root object), check if this line starts a top-level key
+    if (depth === 1) {
+      const m = line.match(/^\s*"([^"]+)"\s*:/);
+      if (m && keySet.has(m[1]!)) {
+        keyPositions.push({ key: m[1]!, startLine: i });
+        keySet.delete(m[1]!);
       }
+    }
+    for (const ch of line) {
+      if (ch === "{" || ch === "[") depth++;
+      else if (ch === "}" || ch === "]") depth--;
     }
   }
 
@@ -280,8 +287,8 @@ export function chunkYaml(content: string): MemoryChunk[] {
   const keyStarts: number[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    // Top-level key: non-indented, non-comment, non-empty, contains ':'
-    if (/^[A-Za-z_]/.test(line) && line.includes(":")) {
+    // Top-level key: valid YAML key name followed by colon
+    if (/^[A-Za-z_][A-Za-z0-9_.\-]*\s*:/.test(line)) {
       keyStarts.push(i);
     }
   }
