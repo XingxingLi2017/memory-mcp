@@ -168,12 +168,13 @@ function searchLike(
   maxResults: number,
   allowedPaths?: Set<string> | null,
 ): SearchResult[] {
-  const pattern = `%${query}%`;
+  const escaped = query.replace(/[%_]/g, "\\$&");
+  const pattern = `%${escaped}%`;
   const rows = db
     .prepare(
       `SELECT id, path, source, start_line, end_line, text
        FROM chunks
-       WHERE text LIKE ?
+       WHERE text LIKE ? ESCAPE '\\'
        ORDER BY updated_at DESC
        LIMIT ?`,
     )
@@ -242,5 +243,7 @@ function bumpAccessCount(db: Database.Database, results: SearchResult[]): void {
       }
     });
     tx();
-  } catch {}
+  } catch (err) {
+    console.error("[memory-mcp] bumpAccessCount error:", err);
+  }
 }

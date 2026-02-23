@@ -57,8 +57,8 @@ server.tool(
     query: z.string().describe("Search query"),
     maxResults: z.number().optional().describe("Max results to return (default: 6)"),
     minScore: z.number().optional().describe("Minimum relevance score 0-1 (default: 0.01)"),
-    after: z.string().optional().describe("Only include files modified after this ISO 8601 timestamp"),
-    before: z.string().optional().describe("Only include files modified before this ISO 8601 timestamp"),
+    after: z.string().optional().describe("Only include files modified after this ISO 8601 timestamp (filters by file mtime, not individual chunk age)"),
+    before: z.string().optional().describe("Only include files modified before this ISO 8601 timestamp (filters by file mtime, not individual chunk age)"),
   },
   async ({ query, maxResults, minScore, after, before }) => {
     await ensureSynced();
@@ -93,6 +93,8 @@ server.tool(
     const allowed =
       rel === "MEMORY.md" ||
       rel === "memory.md" ||
+      rel === "MEMORY.txt" ||
+      rel === "memory.txt" ||
       rel.startsWith("memory/");
     if (!allowed || !MEMORY_EXTENSIONS.has(path.extname(absPath).toLowerCase())) {
       return {
