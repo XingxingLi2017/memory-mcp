@@ -331,7 +331,6 @@ server.tool(
 
     // Force re-sync so the new memory is immediately searchable
     lastSyncAt = 0;
-    lastSessionSyncAt = 0;
 
     const relPath = `memory/${cat}.md`;
     return {

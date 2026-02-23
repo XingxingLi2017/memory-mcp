@@ -23,8 +23,7 @@ Do not skip the memory search step — it ensures continuity across sessions.
 ## Memory Write
 
 You are building a personal memory of this user. As memories grow, you understand them better and they need to explain less.
-Call \`memory_write\` proactively — do not wait for "remember this."
-Write proactively whenever you learn something about the user, their projects, or their way of working.
+Write proactively when you learn lasting facts about the user — skip ephemeral context.
 
 <when_to_write>
 - User reveals how they work: coding style, tools, workflow, naming conventions
