@@ -2,6 +2,14 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+/** File extensions indexed by the memory system. */
+export const MEMORY_EXTENSIONS = new Set([".md", ".txt", ".json", ".yaml", ".yml"]);
+
+function extOf(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i === -1 ? "" : name.slice(i).toLowerCase();
+}
+
 export type MemoryFileEntry = {
   /** Relative path from workspace root */
   path: string;
@@ -32,7 +40,7 @@ export async function listMemoryFiles(workspaceDir: string): Promise<string[]> {
   const skippedSymlinks: string[] = [];
 
   // Check top-level memory files
-  for (const name of ["MEMORY.md", "memory.md"]) {
+  for (const name of ["MEMORY.md", "memory.md", "MEMORY.txt", "memory.txt"]) {
     const p = path.join(workspaceDir, name);
     try {
       const stat = await fs.lstat(p);
@@ -82,7 +90,7 @@ async function walkDir(dir: string, files: string[], skippedSymlinks?: string[])
     }
     if (entry.isDirectory()) {
       await walkDir(full, files, skippedSymlinks);
-    } else if (entry.isFile() && entry.name.endsWith(".md")) {
+    } else if (entry.isFile() && MEMORY_EXTENSIONS.has(extOf(entry.name))) {
       files.push(full);
     }
   }

@@ -8,6 +8,7 @@ import fs from "node:fs";
 import { openDatabase } from "./db.js";
 import { syncMemoryFiles } from "./sync.js";
 import { searchMemory } from "./search.js";
+import { MEMORY_EXTENSIONS } from "./internal.js";
 
 const DEFAULT_WORKSPACE = path.join(
   process.env.HOME ?? process.env.USERPROFILE ?? "~",
@@ -51,15 +52,17 @@ async function ensureSynced(): Promise<void> {
 
 server.tool(
   "memory_search",
-  "Semantically search MEMORY.md and memory/*.md files. Use before answering questions about prior work, decisions, preferences, or project context.",
+  "Semantically search MEMORY.md and memory/*.md files (also .txt, .json, .yaml). Use before answering questions about prior work, decisions, preferences, or project context.",
   {
     query: z.string().describe("Search query"),
     maxResults: z.number().optional().describe("Max results to return (default: 6)"),
     minScore: z.number().optional().describe("Minimum relevance score 0-1 (default: 0.01)"),
+    after: z.string().optional().describe("Only include files modified after this ISO 8601 timestamp"),
+    before: z.string().optional().describe("Only include files modified before this ISO 8601 timestamp"),
   },
-  async ({ query, maxResults, minScore }) => {
+  async ({ query, maxResults, minScore, after, before }) => {
     await ensureSynced();
-    const results = searchMemory(db, query, { maxResults, minScore });
+    const results = searchMemory(db, query, { maxResults, minScore, after, before });
     return {
       content: [
         {
@@ -91,7 +94,7 @@ server.tool(
       rel === "MEMORY.md" ||
       rel === "memory.md" ||
       rel.startsWith("memory/");
-    if (!allowed || !absPath.endsWith(".md")) {
+    if (!allowed || !MEMORY_EXTENSIONS.has(path.extname(absPath).toLowerCase())) {
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ error: "path not allowed" }) }],
         isError: true,

@@ -69,13 +69,22 @@ type FtsRow = {
   rank: number;
 };
 
+export type SearchOpts = {
+  maxResults?: number;
+  minScore?: number;
+  /** ISO 8601 timestamp — only include chunks from files modified after this time */
+  after?: string;
+  /** ISO 8601 timestamp — only include chunks from files modified before this time */
+  before?: string;
+};
+
 /**
  * Search memory chunks using FTS5 full-text search.
  */
 export function searchMemory(
   db: Database.Database,
   query: string,
-  opts?: { maxResults?: number; minScore?: number },
+  opts?: SearchOpts,
 ): SearchResult[] {
   const cleaned = query.trim();
   if (!cleaned) return [];
@@ -83,13 +92,22 @@ export function searchMemory(
   const maxResults = opts?.maxResults ?? 6;
   const minScore = opts?.minScore ?? 0.01;
 
+  // Build set of allowed paths based on time filters
+  const allowedPaths = buildTimeFilter(db, opts?.after, opts?.before);
+  const pathFilter = (r: SearchResult) => !allowedPaths || allowedPaths.has(r.path);
+
   if (!isFtsAvailable(db)) {
-    // Fallback: simple LIKE search
-    return searchLike(db, cleaned, maxResults);
+    const results = searchLike(db, cleaned, maxResults, allowedPaths);
+    bumpAccessCount(db, results);
+    return results;
   }
 
   const queries = buildFtsQueries(cleaned);
-  if (!queries) return searchLike(db, cleaned, maxResults);
+  if (!queries) {
+    const results = searchLike(db, cleaned, maxResults, allowedPaths);
+    bumpAccessCount(db, results);
+    return results;
+  }
 
   const stmt = db.prepare(
     `SELECT id, path, source, start_line, end_line, text, rank
@@ -112,8 +130,8 @@ export function searchMemory(
     // Step 1: NEAR query for CJK precision (if available)
     let results: SearchResult[] = [];
     if (queries.nearExpr) {
-      const nearRows = stmt.all(queries.nearExpr, maxResults) as FtsRow[];
-      results = nearRows.map(toResult).filter((r) => r.score >= minScore);
+      const nearRows = stmt.all(queries.nearExpr, maxResults * 3) as FtsRow[];
+      results = nearRows.map(toResult).filter((r) => r.score >= minScore && pathFilter(r)).slice(0, maxResults);
     }
 
     // Step 2: OR fallback if NEAR didn't fill maxResults
@@ -124,7 +142,7 @@ export function searchMemory(
         const key = `${row.path}:${row.start_line}`;
         if (seenIds.has(key)) continue;
         const mapped = toResult(row);
-        if (mapped.score >= minScore) {
+        if (mapped.score >= minScore && pathFilter(mapped)) {
           results.push(mapped);
           seenIds.add(key);
           if (results.length >= maxResults) break;
@@ -132,9 +150,12 @@ export function searchMemory(
       }
     }
 
+    bumpAccessCount(db, results);
     return results;
   } catch {
-    return searchLike(db, cleaned, maxResults);
+    const results = searchLike(db, cleaned, maxResults, allowedPaths);
+    bumpAccessCount(db, results);
+    return results;
   }
 }
 
@@ -145,6 +166,7 @@ function searchLike(
   db: Database.Database,
   query: string,
   maxResults: number,
+  allowedPaths?: Set<string> | null,
 ): SearchResult[] {
   const pattern = `%${query}%`;
   const rows = db
@@ -155,7 +177,7 @@ function searchLike(
        ORDER BY updated_at DESC
        LIMIT ?`,
     )
-    .all(pattern, maxResults) as Array<{
+    .all(pattern, maxResults * 3) as Array<{
     id: string;
     path: string;
     source: string;
@@ -164,12 +186,61 @@ function searchLike(
     text: string;
   }>;
 
-  return rows.map((row, i) => ({
-    path: row.path,
-    startLine: row.start_line,
-    endLine: row.end_line,
-    score: 1 / (1 + i),
-    snippet: row.text.slice(0, SNIPPET_MAX_CHARS),
-    source: row.source,
-  }));
+  return rows
+    .filter((row) => !allowedPaths || allowedPaths.has(row.path))
+    .slice(0, maxResults)
+    .map((row, i) => ({
+      path: row.path,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      score: 1 / (1 + i),
+      snippet: row.text.slice(0, SNIPPET_MAX_CHARS),
+      source: row.source,
+    }));
+}
+
+/**
+ * Build a set of allowed paths based on time filters.
+ * Returns null if no time filter is active (= allow all).
+ */
+function buildTimeFilter(
+  db: Database.Database,
+  after?: string,
+  before?: string,
+): Set<string> | null {
+  if (!after && !before) return null;
+
+  const conditions: string[] = [];
+  const params: number[] = [];
+  if (after) {
+    conditions.push("mtime >= ?");
+    params.push(new Date(after).getTime());
+  }
+  if (before) {
+    conditions.push("mtime <= ?");
+    params.push(new Date(before).getTime());
+  }
+
+  const rows = db
+    .prepare(`SELECT path FROM files WHERE ${conditions.join(" AND ")}`)
+    .all(...params) as Array<{ path: string }>;
+  return new Set(rows.map((r) => r.path));
+}
+
+/**
+ * Increment access_count for chunks matching search results.
+ */
+function bumpAccessCount(db: Database.Database, results: SearchResult[]): void {
+  if (results.length === 0) return;
+  try {
+    const stmt = db.prepare(
+      `UPDATE chunks SET access_count = access_count + 1 WHERE path = ? AND start_line = ?`,
+    );
+    const tx = db.transaction(() => {
+      for (const r of results) {
+        stmt.run(r.path, r.startLine);
+      }
+    });
+    tx();
+  } catch {}
 }
