@@ -7,6 +7,9 @@ Indexes `MEMORY.md` and `memory/` files into a SQLite database with **hybrid sea
 ## Features
 
 - **Hybrid search** — combines BM25 keyword matching with vector cosine similarity for best-of-both-worlds retrieval
+- **Fact + Evidence architecture** — `memory_write` stores compressed facts with linked evidence for traceability
+- **Semantic dedup** — exact string + vector similarity checks prevent duplicate memories
+- **Memory lifecycle** — `memory_forget` and `memory_update` with semantic matching (string match → vector fallback)
 - **CJK support** — jieba-wasm pre-segmentation enables Chinese/Japanese/Korean full-text search
 - **Multi-format** — indexes `.md`, `.txt`, `.json`, `.jsonl`, `.yaml`, `.yml` files
 - **Graceful degradation** — vector search requires optional native dependencies; falls back to FTS-only if unavailable
@@ -51,7 +54,9 @@ Memory files live in a dot-directory under your home folder:
 └── memory/
     ├── decisions.md       # Architecture decisions
     ├── preferences.md     # User preferences
-    └── context.md         # Project context
+    ├── context.md         # Project context
+    └── evidence/          # Auto-generated evidence files
+        └── a1b2c3d4e5f6.md  # Linked to a fact via [ref:...]
 ```
 
 The host CLI will automatically search these files before answering questions about prior work, decisions, or preferences.
@@ -62,7 +67,9 @@ The host CLI will automatically search these files before answering questions ab
 |------|-------------|
 | `memory_search` | Hybrid search (BM25 + vector) across all memory files. Supports `query`, `maxResults`, `minScore`, `after`/`before` time filters |
 | `memory_get` | Read specific lines from a memory file |
-| `memory_write` | Save user-specific knowledge (preferences, decisions, context) to persistent memory. The more it learns, the less the user needs to explain |
+| `memory_write` | Save a fact with optional evidence. The system auto-chunks evidence and links it to the fact via `[ref:evidence/...]` for traceability |
+| `memory_forget` | Remove a memory entry by semantic matching. Cleans up linked evidence files |
+| `memory_update` | Replace a memory entry with new content and optional new evidence. Cleans up old evidence |
 | `memory_status` | Show index status: file/chunk counts, embedding coverage, health checks |
 
 ## How it Works
