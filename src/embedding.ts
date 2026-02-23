@@ -87,14 +87,19 @@ export function getEmbeddingDimensions(): number | null {
 
 /**
  * Check if the embedding provider is available (model downloaded).
+ * Result is cached after first successful check.
  */
+let embeddingAvailableCache: boolean | null = null;
 export async function isEmbeddingAvailable(): Promise<boolean> {
   if (unavailable) return false;
+  if (embeddingAvailableCache !== null) return embeddingAvailableCache;
   try {
     const { resolveModelFile } = await import("node-llama-cpp");
     await resolveModelFile(DEFAULT_MODEL);
+    embeddingAvailableCache = true;
     return true;
   } catch {
+    embeddingAvailableCache = false;
     return false;
   }
 }

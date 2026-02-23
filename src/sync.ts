@@ -139,67 +139,75 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
   const vecOk = isVecAvailable(db);
   if (!vecOk) return 0;
 
-  // Find chunks without embeddings
-  const missing = db
-    .prepare(
-      `SELECT c.id, c.hash, c.text FROM chunks c
-       WHERE NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.id = c.id)
-       LIMIT 100`,
-    )
-    .all() as Array<{ id: string; hash: string; text: string }>;
+  let totalEmbedded = 0;
 
-  if (missing.length === 0) return 0;
+  while (true) {
+    // Find chunks without embeddings
+    const missing = db
+      .prepare(
+        `SELECT c.id, c.hash, c.text FROM chunks c
+         WHERE NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.id = c.id)
+         LIMIT 100`,
+      )
+      .all() as Array<{ id: string; hash: string; text: string }>;
 
-  // Check embedding cache for already-computed hashes
-  const cached = new Map<string, Buffer>();
-  const uncached: Array<{ index: number; id: string; hash: string; text: string }> = [];
+    if (missing.length === 0) break;
 
-  for (let i = 0; i < missing.length; i++) {
-    const row = missing[i]!;
-    const hit = db
-      .prepare(`SELECT embedding FROM embedding_cache WHERE hash = ?`)
-      .get(row.hash) as { embedding: Buffer } | undefined;
-    if (hit) {
-      cached.set(row.id, hit.embedding);
-    } else {
-      uncached.push({ index: i, ...row });
+    // Check embedding cache for already-computed hashes
+    const cached = new Map<string, Buffer>();
+    const uncached: Array<{ index: number; id: string; hash: string; text: string }> = [];
+
+    for (let i = 0; i < missing.length; i++) {
+      const row = missing[i]!;
+      const hit = db
+        .prepare(`SELECT embedding FROM embedding_cache WHERE hash = ?`)
+        .get(row.hash) as { embedding: Buffer } | undefined;
+      if (hit) {
+        cached.set(row.id, hit.embedding);
+      } else {
+        uncached.push({ index: i, ...row });
+      }
     }
+
+    // Embed uncached texts in batch
+    let newEmbeddings: number[][] = [];
+    let embedFailed = false;
+    if (uncached.length > 0) {
+      try {
+        newEmbeddings = await embedBatch(uncached.map((u) => u.text));
+      } catch (err) {
+        console.error("[memory-mcp] embedding failed:", err);
+        embedFailed = true;
+      }
+    }
+
+    // Store all embeddings
+    const insertVec = db.prepare(`INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?, ?)`);
+    const insertCache = db.prepare(
+      `INSERT OR REPLACE INTO embedding_cache (hash, embedding, updated_at) VALUES (?, ?, ?)`,
+    );
+    const now = Date.now();
+
+    const tx = db.transaction(() => {
+      for (const [id, buf] of cached) {
+        insertVec.run(id, buf);
+      }
+      for (let i = 0; i < uncached.length; i++) {
+        const item = uncached[i]!;
+        const vec = newEmbeddings[i];
+        if (!vec || vec.length === 0) continue;
+        const buf = vectorToBuffer(vec);
+        insertVec.run(item.id, buf);
+        insertCache.run(item.hash, buf, now);
+      }
+    });
+    tx();
+
+    totalEmbedded += cached.size + newEmbeddings.length;
+
+    // If embedding failed, stop processing further batches
+    if (embedFailed) break;
   }
 
-  // Embed uncached texts in batch
-  let newEmbeddings: number[][] = [];
-  if (uncached.length > 0) {
-    try {
-      newEmbeddings = await embedBatch(uncached.map((u) => u.text));
-    } catch (err) {
-      console.error("[memory-mcp] embedding failed:", err);
-      return cached.size; // Still store cached ones
-    }
-  }
-
-  // Store all embeddings
-  const insertVec = db.prepare(`INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?, ?)`);
-  const insertCache = db.prepare(
-    `INSERT OR REPLACE INTO embedding_cache (hash, embedding, updated_at) VALUES (?, ?, ?)`,
-  );
-  const now = Date.now();
-
-  const tx = db.transaction(() => {
-    // Store cached embeddings
-    for (const [id, buf] of cached) {
-      insertVec.run(id, buf);
-    }
-    // Store new embeddings
-    for (let i = 0; i < uncached.length; i++) {
-      const item = uncached[i]!;
-      const vec = newEmbeddings[i];
-      if (!vec || vec.length === 0) continue;
-      const buf = vectorToBuffer(vec);
-      insertVec.run(item.id, buf);
-      insertCache.run(item.hash, buf, now);
-    }
-  });
-  tx();
-
-  return cached.size + newEmbeddings.length;
+  return totalEmbedded;
 }

@@ -148,7 +148,7 @@ export async function searchMemory(
   // Hybrid merge or single-source
   let results: SearchResult[];
   if (ftsResults.length > 0 && vecResults.length > 0) {
-    results = mergeHybrid(ftsResults, vecResults, 0.3, 0.7);
+    results = mergeHybrid(ftsResults, vecResults, 0.5, 0.5);
   } else if (vecResults.length > 0) {
     results = vecResults;
   } else if (ftsResults.length > 0) {
@@ -163,7 +163,22 @@ export async function searchMemory(
 }
 
 /**
+ * Min-max normalize scores to 0-1 range.
+ */
+function normalizeScores(results: SearchResult[]): void {
+  if (results.length <= 1) return;
+  const scores = results.map((r) => r.score);
+  const max = Math.max(...scores);
+  const min = Math.min(...scores);
+  if (max === min) return;
+  for (const r of results) {
+    r.score = (r.score - min) / (max - min);
+  }
+}
+
+/**
  * Merge FTS and vector search results with weighted scoring.
+ * Normalizes both score sets to 0-1 before combining.
  * score = α * bm25_score + β * vector_score
  */
 function mergeHybrid(
@@ -172,6 +187,10 @@ function mergeHybrid(
   ftsWeight: number,
   vecWeight: number,
 ): SearchResult[] {
+  // Normalize each set independently so scales are comparable
+  normalizeScores(ftsResults);
+  normalizeScores(vecResults);
+
   const byKey = new Map<string, { ftsScore: number; vecScore: number; result: SearchResult }>();
 
   for (const r of ftsResults) {

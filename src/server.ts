@@ -29,7 +29,7 @@ const server = new McpServer({
 });
 
 const dbPath = resolveDbPath();
-const db = openDatabase(dbPath);
+let db: import("better-sqlite3").Database;
 let lastSyncAt = 0;
 const SYNC_COOLDOWN_MS = 5_000;
 
@@ -199,6 +199,7 @@ server.tool(
 // --- Start ---
 
 async function main() {
+  db = await openDatabase(dbPath);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // Initial sync on startup

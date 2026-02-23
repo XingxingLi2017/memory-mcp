@@ -3,16 +3,23 @@ import path from "node:path";
 import fs from "node:fs";
 
 let sqliteVec: typeof import("sqlite-vec") | null = null;
-try {
-  sqliteVec = await import("sqlite-vec");
-} catch {
-  // sqlite-vec not installed — vector search will be disabled
+let sqliteVecLoaded = false;
+
+async function ensureSqliteVec(): Promise<typeof import("sqlite-vec") | null> {
+  if (sqliteVecLoaded) return sqliteVec;
+  sqliteVecLoaded = true;
+  try {
+    sqliteVec = await import("sqlite-vec");
+  } catch {
+    // sqlite-vec not installed — vector search will be disabled
+  }
+  return sqliteVec;
 }
 
 const SCHEMA_VERSION = 6;
 const EMBEDDING_DIMS = 768;
 
-export function openDatabase(dbPath: string): Database.Database {
+export async function openDatabase(dbPath: string): Promise<Database.Database> {
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -23,9 +30,10 @@ export function openDatabase(dbPath: string): Database.Database {
   db.pragma("busy_timeout = 5000");
 
   // Load sqlite-vec extension (if available)
-  if (sqliteVec) {
+  const vec = await ensureSqliteVec();
+  if (vec) {
     try {
-      sqliteVec.load(db);
+      vec.load(db);
     } catch (err) {
       console.error("[memory-mcp] sqlite-vec load failed:", err);
     }
@@ -43,7 +51,7 @@ export function openDatabase(dbPath: string): Database.Database {
     db.exec("DROP TABLE IF EXISTS meta");
   }
 
-  ensureSchema(db);
+  ensureSchema(db, vec);
   return db;
 }
 
@@ -59,7 +67,7 @@ function checkSchemaVersion(db: Database.Database): boolean {
   }
 }
 
-function ensureSchema(db: Database.Database): void {
+function ensureSchema(db: Database.Database, vec: typeof import("sqlite-vec") | null): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -116,7 +124,7 @@ function ensureSchema(db: Database.Database): void {
   ).run(String(SCHEMA_VERSION));
 
   // Vector search table (sqlite-vec) — only if extension loaded
-  if (sqliteVec) {
+  if (vec) {
     try {
       db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
