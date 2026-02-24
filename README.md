@@ -41,6 +41,19 @@ If they fail to install (e.g. missing build tools), the server still works with 
 
 The embedding model ([embeddinggemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF), ~328 MB) is downloaded automatically on first use to `~/.node-llama-cpp/models/`.
 
+### Windows: Known Issue with Prebuilt Binaries
+
+The prebuilt `@node-llama-cpp/win-x64` binary (compiled with MinGW64) has a bug where `getMathCores()` returns 0 in certain VM environments (e.g. Hyper-V), causing single-threaded inference (~28x slower than expected). This makes embedding generation too slow to complete within a typical MCP session.
+
+**Fix:** Build node-llama-cpp from source using MSVC instead of the prebuilt binary:
+
+```bash
+npx --no node-llama-cpp source download
+npx --no node-llama-cpp source build
+```
+
+This compiles with the correct Windows API path and restores full multi-threaded performance. See [#1](https://github.com/XingxingLi2017/memory-mcp/issues/1) for details.
+
 ## Usage
 
 Memory files live in a dot-directory under your home folder:
