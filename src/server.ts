@@ -86,7 +86,7 @@ async function ensureSynced(): Promise<void> {
       lastSyncAt = Date.now();
     }
     if (sessionDue) {
-      await syncSessionFiles(db, workspaceDir, {
+      await syncSessionFiles(db, {
         chunkSize: resolveChunkSize(),
         maxDays: resolveSessionDays(),
         maxCount: resolveSessionMax(),

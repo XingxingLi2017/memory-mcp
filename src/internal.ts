@@ -529,7 +529,6 @@ function resolveSessionSources(): SessionSource[] {
  * maxCount=0 disables session indexing. maxCount=-1 means no count limit.
  */
 export async function listSessionFiles(
-  workspaceDir: string,
   opts?: { maxDays?: number; maxCount?: number },
 ): Promise<string[]> {
   const maxCount = opts?.maxCount ?? -1;
@@ -613,7 +612,6 @@ function isClaudeCommand(text: string): boolean {
  */
 export async function buildSessionEntry(
   absPath: string,
-  workspaceDir: string,
 ): Promise<SessionFileEntry | null> {
   try {
     const stat = await fs.stat(absPath);

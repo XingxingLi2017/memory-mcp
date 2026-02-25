@@ -158,10 +158,9 @@ function indexFile(
  */
 export async function syncSessionFiles(
   db: Database.Database,
-  workspaceDir: string,
   opts?: { force?: boolean; chunkSize?: number; maxDays?: number; maxCount?: number },
 ): Promise<SyncResult> {
-  const files = await listSessionFiles(workspaceDir, {
+  const files = await listSessionFiles({
     maxDays: opts?.maxDays,
     maxCount: opts?.maxCount,
   });
@@ -171,7 +170,7 @@ export async function syncSessionFiles(
   let skipped = 0;
 
   for (const absPath of files) {
-    const entry = await buildSessionEntry(absPath, workspaceDir);
+    const entry = await buildSessionEntry(absPath);
     if (!entry) continue;
 
     activePaths.add(entry.path);
