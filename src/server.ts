@@ -59,6 +59,13 @@ function resolveSessionMax(): number {
   return -1; // no count limit
 }
 
+function resolveExtraDirs(): string[] | undefined {
+  const val = process.env.MEMORY_EXTRA_DIRS;
+  if (!val) return undefined;
+  const dirs = val.split(",").map((d) => d.trim()).filter(Boolean).map((d) => path.resolve(d));
+  return dirs.length > 0 ? dirs : undefined;
+}
+
 const server = new McpServer({
   name: "memory",
   version: "0.1.0",
@@ -82,7 +89,7 @@ async function ensureSynced(): Promise<void> {
   const workspaceDir = resolveWorkspaceDir();
   try {
     if (memoryDue) {
-      await syncMemoryFiles(db, workspaceDir, { chunkSize: resolveChunkSize() });
+      await syncMemoryFiles(db, workspaceDir, { chunkSize: resolveChunkSize(), extraDirs: resolveExtraDirs() });
       lastSyncAt = Date.now();
     }
     if (sessionDue) {
@@ -141,18 +148,50 @@ server.tool(
   },
   async ({ path: relPath, from, lines }) => {
     const workspaceDir = resolveWorkspaceDir();
-    const absPath = path.isAbsolute(relPath)
-      ? path.resolve(relPath)
-      : path.resolve(workspaceDir, relPath);
+    const extraDirs = resolveExtraDirs();
 
-    // Security: only allow memory paths
+    // Resolve extra: prefix paths (e.g. extra:ObsidianVault/notes/foo.md)
+    let absPath: string;
+    if (relPath.startsWith("extra:") && extraDirs) {
+      const rest = relPath.slice("extra:".length); // e.g. ObsidianVault/notes/foo.md
+      const dirName = rest.split("/")[0]!;
+      const matched = extraDirs.find((d) => path.basename(d) === dirName);
+      if (matched) {
+        const subPath = rest.slice(dirName.length + 1);
+        absPath = path.resolve(matched, subPath);
+      } else {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ error: "path not allowed" }) }],
+          isError: true,
+        };
+      }
+    } else {
+      absPath = path.isAbsolute(relPath)
+        ? path.resolve(relPath)
+        : path.resolve(workspaceDir, relPath);
+    }
+
+    // Security: allow workspace memory paths + extraDirs paths
+    let allowed = false;
     const rel = path.relative(workspaceDir, absPath).replace(/\\/g, "/");
-    const allowed =
+    if (
       rel === "MEMORY.md" ||
       rel === "memory.md" ||
       rel === "MEMORY.txt" ||
       rel === "memory.txt" ||
-      rel.startsWith("memory/");
+      rel.startsWith("memory/")
+    ) {
+      allowed = true;
+    }
+    if (!allowed && extraDirs) {
+      for (const dir of extraDirs) {
+        const extraRel = path.relative(dir, absPath).replace(/\\/g, "/");
+        if (!extraRel.startsWith("..")) {
+          allowed = true;
+          break;
+        }
+      }
+    }
     if (!allowed || !MEMORY_EXTENSIONS.has(path.extname(absPath).toLowerCase())) {
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ error: "path not allowed" }) }],

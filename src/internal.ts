@@ -35,7 +35,7 @@ export function hashText(value: string): string {
 /**
  * Discover all .md files in MEMORY.md, memory.md, and memory/ directory.
  */
-export async function listMemoryFiles(workspaceDir: string): Promise<string[]> {
+export async function listMemoryFiles(workspaceDir: string, extraDirs?: string[]): Promise<string[]> {
   const result: string[] = [];
   const skippedSymlinks: string[] = [];
 
@@ -60,6 +60,18 @@ export async function listMemoryFiles(workspaceDir: string): Promise<string[]> {
       await walkDir(memoryDir, result, skippedSymlinks);
     }
   } catch {}
+
+  // Walk extra directories (e.g. Obsidian vault)
+  if (extraDirs) {
+    for (const dir of extraDirs) {
+      try {
+        const stat = await fs.lstat(dir);
+        if (stat.isDirectory() && !stat.isSymbolicLink()) {
+          await walkDir(dir, result, skippedSymlinks);
+        }
+      } catch {}
+    }
+  }
 
   if (skippedSymlinks.length > 0) {
     console.error(`[memory-mcp] Skipped ${skippedSymlinks.length} symlink(s): ${skippedSymlinks.join(", ")}`);
@@ -99,11 +111,23 @@ async function walkDir(dir: string, files: string[], skippedSymlinks?: string[])
 export async function buildFileEntry(
   absPath: string,
   workspaceDir: string,
+  extraDirs?: string[],
 ): Promise<MemoryFileEntry> {
   const stat = await fs.stat(absPath);
   const content = await fs.readFile(absPath, "utf-8");
+  // For files under extraDirs, compute path relative to their own root
+  let relPath = path.relative(workspaceDir, absPath).replace(/\\/g, "/");
+  if (extraDirs && relPath.startsWith("..")) {
+    for (const dir of extraDirs) {
+      const rel = path.relative(dir, absPath).replace(/\\/g, "/");
+      if (!rel.startsWith("..")) {
+        relPath = `extra:${path.basename(dir)}/${rel}`;
+        break;
+      }
+    }
+  }
   return {
-    path: path.relative(workspaceDir, absPath).replace(/\\/g, "/"),
+    path: relPath,
     absPath,
     mtimeMs: stat.mtimeMs,
     size: stat.size,

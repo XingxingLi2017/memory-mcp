@@ -108,6 +108,23 @@ The host CLI will automatically search these files before answering questions ab
 | `MEMORY_TOKEN_MAX` | `4096` | Default max tokens per search response (100–16384). Controls snippet length and result count |
 | `MEMORY_SESSION_DAYS` | `30` | Only index session transcripts from the last N days (0 = index all) |
 | `MEMORY_SESSION_MAX` | `-1` | Max number of sessions to index, newest first (-1 = no limit, 0 = disable session indexing) |
+| `MEMORY_EXTRA_DIRS` | _(none)_ | Comma-separated extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
+
+## CLI
+
+A standalone CLI is available for non-MCP integrations (e.g. calling from scripts or other agents):
+
+```bash
+# Search
+memory-mcp-cli search "query" --max-results 10 --min-score 0.1
+
+# Index status
+memory-mcp-cli status
+```
+
+Or run directly: `node dist/cli.js search "query"`
+
+Output is JSON to stdout, suitable for piping into other tools.
 
 ## Uninstall
 
