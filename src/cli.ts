@@ -79,6 +79,26 @@ function parseArgs(args: string[]): { command: string; query?: string; opts: Rec
   return { command, query, opts };
 }
 
+function parsePositiveInt(val: string | undefined, name: string): number | undefined {
+  if (!val) return undefined;
+  const n = Number(val);
+  if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
+    console.error(`Error: --${name} must be a positive integer, got "${val}"`);
+    process.exit(1);
+  }
+  return n;
+}
+
+function parsePositiveFloat(val: string | undefined, name: string): number | undefined {
+  if (!val) return undefined;
+  const n = Number(val);
+  if (!Number.isFinite(n) || n < 0) {
+    console.error(`Error: --${name} must be a non-negative number, got "${val}"`);
+    process.exit(1);
+  }
+  return n;
+}
+
 async function main(): Promise<void> {
   const { command, query, opts } = parseArgs(process.argv.slice(2));
 
@@ -102,9 +122,9 @@ async function main(): Promise<void> {
       console.error("Error: search requires a query argument");
       process.exit(1);
     }
-    const maxResults = opts["max-results"] ? Number(opts["max-results"]) : 10;
-    const minScore = opts["min-score"] ? Number(opts["min-score"]) : undefined;
-    const tokenMax = opts["token-max"] ? Number(opts["token-max"]) : undefined;
+    const maxResults = parsePositiveInt(opts["max-results"], "max-results") ?? 10;
+    const minScore = parsePositiveFloat(opts["min-score"], "min-score");
+    const tokenMax = parsePositiveInt(opts["token-max"], "token-max");
     const results = await searchMemory(db, query, { maxResults, minScore, tokenMax });
     console.log(JSON.stringify({ results, count: results.length }, null, 2));
   } else if (command === "status") {

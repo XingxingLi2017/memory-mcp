@@ -8,7 +8,7 @@ import fs from "node:fs";
 import { openDatabase } from "./db.js";
 import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
-import { MEMORY_EXTENSIONS, hashText } from "./internal.js";
+import { MEMORY_EXTENSIONS, hashText, buildExtraDirAliases } from "./internal.js";
 
 const DEFAULT_WORKSPACE = path.join(
   process.env.HOME ?? process.env.USERPROFILE ?? "~",
@@ -150,14 +150,22 @@ server.tool(
     const workspaceDir = resolveWorkspaceDir();
     const extraDirs = resolveExtraDirs();
 
-    // Resolve extra: prefix paths (e.g. extra:ObsidianVault/notes/foo.md)
+    // Resolve extra: prefix paths using alias → directory mapping
     let absPath: string;
     if (relPath.startsWith("extra:") && extraDirs) {
-      const rest = relPath.slice("extra:".length); // e.g. ObsidianVault/notes/foo.md
-      const dirName = rest.split("/")[0]!;
-      const matched = extraDirs.find((d) => path.basename(d) === dirName);
+      const rest = relPath.slice("extra:".length); // e.g. a-vault/notes/foo.md
+      const aliases = buildExtraDirAliases(extraDirs);
+      // Find alias match: try longest alias prefix first
+      let matched: string | undefined;
+      let subPath = "";
+      for (const [dir, alias] of aliases) {
+        if (rest.startsWith(alias + "/")) {
+          matched = dir;
+          subPath = rest.slice(alias.length + 1);
+          break;
+        }
+      }
       if (matched) {
-        const subPath = rest.slice(dirName.length + 1);
         absPath = path.resolve(matched, subPath);
       } else {
         return {

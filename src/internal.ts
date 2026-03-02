@@ -2,6 +2,48 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+/**
+ * Build unique aliases for extra directories.
+ * Uses basename when unique; appends parent segments to disambiguate collisions.
+ * E.g. ["/a/vault", "/b/vault"] → { "/a/vault": "a-vault", "/b/vault": "b-vault" }
+ */
+export function buildExtraDirAliases(dirs: string[]): Map<string, string> {
+  const result = new Map<string, string>();
+  if (dirs.length === 0) return result;
+
+  // Start with basenames
+  const aliases = dirs.map((d) => ({ dir: d, segments: [path.basename(d)] }));
+
+  // Resolve collisions by prepending parent segments
+  for (let depth = 0; depth < 10; depth++) {
+    const seen = new Map<string, number[]>();
+    for (let i = 0; i < aliases.length; i++) {
+      const key = aliases[i]!.segments.join("-");
+      if (!seen.has(key)) seen.set(key, []);
+      seen.get(key)!.push(i);
+    }
+    let hasCollision = false;
+    for (const [, indices] of seen) {
+      if (indices.length <= 1) continue;
+      hasCollision = true;
+      for (const idx of indices) {
+        const entry = aliases[idx]!;
+        const parts = entry.dir.split(path.sep).filter(Boolean);
+        const currentDepth = entry.segments.length;
+        if (currentDepth < parts.length) {
+          entry.segments.unshift(parts[parts.length - currentDepth - 1]!);
+        }
+      }
+    }
+    if (!hasCollision) break;
+  }
+
+  for (const entry of aliases) {
+    result.set(entry.dir, entry.segments.join("-"));
+  }
+  return result;
+}
+
 /** File extensions indexed by the memory system. */
 export const MEMORY_EXTENSIONS = new Set([".md", ".txt", ".json", ".jsonl", ".yaml", ".yml"]);
 
@@ -111,17 +153,17 @@ async function walkDir(dir: string, files: string[], skippedSymlinks?: string[])
 export async function buildFileEntry(
   absPath: string,
   workspaceDir: string,
-  extraDirs?: string[],
+  extraDirAliases?: Map<string, string>,
 ): Promise<MemoryFileEntry> {
   const stat = await fs.stat(absPath);
   const content = await fs.readFile(absPath, "utf-8");
-  // For files under extraDirs, compute path relative to their own root
+  // For files under extraDirs, compute path relative to their own root with alias prefix
   let relPath = path.relative(workspaceDir, absPath).replace(/\\/g, "/");
-  if (extraDirs && relPath.startsWith("..")) {
-    for (const dir of extraDirs) {
+  if (extraDirAliases && relPath.startsWith("..")) {
+    for (const [dir, alias] of extraDirAliases) {
       const rel = path.relative(dir, absPath).replace(/\\/g, "/");
       if (!rel.startsWith("..")) {
-        relPath = `extra:${path.basename(dir)}/${rel}`;
+        relPath = `extra:${alias}/${rel}`;
         break;
       }
     }

@@ -5,6 +5,7 @@ import {
   listSessionFiles,
   buildFileEntry,
   buildSessionEntry,
+  buildExtraDirAliases,
   chunkFile,
   chunkMarkdown,
   type MemoryFileEntry,
@@ -29,8 +30,9 @@ export async function syncMemoryFiles(
   opts?: { force?: boolean; chunkSize?: number; extraDirs?: string[] },
 ): Promise<SyncResult> {
   const files = await listMemoryFiles(workspaceDir, opts?.extraDirs);
+  const extraDirAliases = opts?.extraDirs ? buildExtraDirAliases(opts.extraDirs) : undefined;
   const entries = await Promise.all(
-    files.map((f) => buildFileEntry(f, workspaceDir, opts?.extraDirs)),
+    files.map((f) => buildFileEntry(f, workspaceDir, extraDirAliases)),
   );
 
   const ftsOk = isFtsAvailable(db);
