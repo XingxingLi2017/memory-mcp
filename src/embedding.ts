@@ -5,7 +5,7 @@
  */
 
 const DEFAULT_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
-const ENV_MODEL_PATH = process.env.MEMORY_MCP_MODEL_PATH;
+const ENV_MODEL_PATH = process.env.MEMORY_MCP_MODEL_PATH || undefined;
 
 // Lazy-init state
 let llamaInstance: unknown = null;
@@ -36,6 +36,9 @@ async function ensureContext(): Promise<EmbeddingContext> {
   }
   if (!embeddingModel) {
     const modelPath = ENV_MODEL_PATH ?? await nodeLlamaCpp.resolveModelFile(DEFAULT_MODEL);
+    if (!modelPath.endsWith(".gguf")) {
+      throw new Error(`MEMORY_MCP_MODEL_PATH does not point to a .gguf file: ${modelPath}`);
+    }
     embeddingModel = await (llamaInstance as { loadModel(o: { modelPath: string }): Promise<unknown> }).loadModel({ modelPath });
   }
   if (!embeddingContext) {
@@ -96,8 +99,12 @@ export async function isEmbeddingAvailable(): Promise<boolean> {
   if (embeddingAvailableCache !== null) return embeddingAvailableCache;
   try {
     if (ENV_MODEL_PATH) {
-      const { accessSync } = await import("fs");
-      accessSync(ENV_MODEL_PATH);
+      if (!ENV_MODEL_PATH.endsWith(".gguf")) {
+        embeddingAvailableCache = false;
+        return false;
+      }
+      const { access } = await import("fs/promises");
+      await access(ENV_MODEL_PATH);
     } else {
       const { resolveModelFile } = await import("node-llama-cpp");
       await resolveModelFile(DEFAULT_MODEL);
