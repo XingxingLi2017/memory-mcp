@@ -5,7 +5,11 @@
  */
 
 const DEFAULT_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
-const ENV_MODEL_PATH = process.env.MEMORY_MCP_MODEL_PATH || undefined;
+const ENV_MODEL = process.env.MEMORY_MCP_MODEL || undefined;
+
+function isHfUri(s: string): boolean {
+  return s.startsWith("hf:");
+}
 
 // Lazy-init state
 let llamaInstance: unknown = null;
@@ -35,9 +39,15 @@ async function ensureContext(): Promise<EmbeddingContext> {
     llamaInstance = await nodeLlamaCpp.getLlama({ logLevel: nodeLlamaCpp.LlamaLogLevel.error });
   }
   if (!embeddingModel) {
-    const modelPath = ENV_MODEL_PATH ?? await nodeLlamaCpp.resolveModelFile(DEFAULT_MODEL);
-    if (!modelPath.endsWith(".gguf")) {
-      throw new Error(`MEMORY_MCP_MODEL_PATH does not point to a .gguf file: ${modelPath}`);
+    const spec = ENV_MODEL ?? DEFAULT_MODEL;
+    let modelPath: string;
+    if (isHfUri(spec)) {
+      modelPath = await nodeLlamaCpp.resolveModelFile(spec);
+    } else {
+      if (!spec.endsWith(".gguf")) {
+        throw new Error(`MEMORY_MCP_MODEL does not point to a .gguf file: ${spec}`);
+      }
+      modelPath = spec;
     }
     embeddingModel = await (llamaInstance as { loadModel(o: { modelPath: string }): Promise<unknown> }).loadModel({ modelPath });
   }
@@ -98,16 +108,17 @@ export async function isEmbeddingAvailable(): Promise<boolean> {
   if (unavailable) return false;
   if (embeddingAvailableCache !== null) return embeddingAvailableCache;
   try {
-    if (ENV_MODEL_PATH) {
-      if (!ENV_MODEL_PATH.endsWith(".gguf")) {
+    const spec = ENV_MODEL ?? DEFAULT_MODEL;
+    if (isHfUri(spec)) {
+      const { resolveModelFile } = await import("node-llama-cpp");
+      await resolveModelFile(spec);
+    } else {
+      if (!spec.endsWith(".gguf")) {
         embeddingAvailableCache = false;
         return false;
       }
       const { access } = await import("fs/promises");
-      await access(ENV_MODEL_PATH);
-    } else {
-      const { resolveModelFile } = await import("node-llama-cpp");
-      await resolveModelFile(DEFAULT_MODEL);
+      await access(spec);
     }
     embeddingAvailableCache = true;
     return true;
