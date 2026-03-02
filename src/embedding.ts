@@ -1,10 +1,17 @@
 /**
- * Local embedding provider using node-llama-cpp + embeddinggemma-300M.
- * Lazy-loaded: model is only downloaded/loaded on first embedding request.
+ * Local embedding provider using node-llama-cpp.
+ * Model is configurable via MEMORY_MCP_MODEL env var (HF URI or local path).
+ * Defaults to embeddinggemma-300M. Lazy-loaded on first embedding request.
  * Gracefully unavailable if node-llama-cpp is not installed.
  */
 
 const DEFAULT_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
+const ENV_MODEL = process.env.MEMORY_MCP_MODEL || undefined;
+
+/** Check if spec is a HF URI (only hf: scheme supported by node-llama-cpp resolveModelFile). */
+function isHfUri(s: string): boolean {
+  return s.startsWith("hf:");
+}
 
 // Lazy-init state
 let llamaInstance: unknown = null;
@@ -34,7 +41,16 @@ async function ensureContext(): Promise<EmbeddingContext> {
     llamaInstance = await nodeLlamaCpp.getLlama({ logLevel: nodeLlamaCpp.LlamaLogLevel.error });
   }
   if (!embeddingModel) {
-    const modelPath = await nodeLlamaCpp.resolveModelFile(DEFAULT_MODEL);
+    const spec = ENV_MODEL ?? DEFAULT_MODEL;
+    let modelPath: string;
+    if (isHfUri(spec)) {
+      modelPath = await nodeLlamaCpp.resolveModelFile(spec);
+    } else {
+      if (!spec.endsWith(".gguf")) {
+        throw new Error(`MEMORY_MCP_MODEL does not point to a .gguf file: ${spec}`);
+      }
+      modelPath = spec;
+    }
     embeddingModel = await (llamaInstance as { loadModel(o: { modelPath: string }): Promise<unknown> }).loadModel({ modelPath });
   }
   if (!embeddingContext) {
@@ -94,8 +110,18 @@ export async function isEmbeddingAvailable(): Promise<boolean> {
   if (unavailable) return false;
   if (embeddingAvailableCache !== null) return embeddingAvailableCache;
   try {
-    const { resolveModelFile } = await import("node-llama-cpp");
-    await resolveModelFile(DEFAULT_MODEL);
+    const spec = ENV_MODEL ?? DEFAULT_MODEL;
+    if (isHfUri(spec)) {
+      const { resolveModelFile } = await import("node-llama-cpp");
+      await resolveModelFile(spec);
+    } else {
+      if (!spec.endsWith(".gguf")) {
+        embeddingAvailableCache = false;
+        return false;
+      }
+      const { access } = await import("fs/promises");
+      await access(spec);
+    }
     embeddingAvailableCache = true;
     return true;
   } catch {
