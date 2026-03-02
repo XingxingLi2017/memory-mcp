@@ -39,7 +39,7 @@ Vector search uses [node-llama-cpp](https://github.com/withcatai/node-llama-cpp)
 
 If they fail to install (e.g. missing build tools), the server still works with FTS5-only search — no manual intervention needed.
 
-The embedding model ([embeddinggemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF), ~328 MB) is downloaded automatically on first use to `~/.node-llama-cpp/models/`.
+The default embedding model ([embeddinggemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF), ~328 MB) is downloaded automatically on first use to `~/.node-llama-cpp/models/`. You can swap it via the `MEMORY_MCP_MODEL` environment variable (see [Environment Variables](#environment-variables)).
 
 ### Windows: Known Issue with Prebuilt Binaries
 
@@ -101,6 +101,7 @@ The host CLI will automatically search these files before answering questions ab
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `MEMORY_MCP_MODEL` | `hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf` | Embedding model. Accepts a HuggingFace URI (`hf:org/repo/file.gguf`) for auto-download, or a local file path (`/path/to/model.gguf`) |
 | `MEMORY_WORKSPACE` | `~/.copilot` | Root directory to scan for memory files |
 | `MEMORY_DB_PATH` | `~/.copilot/memory.db` | Path to SQLite database |
 | `MEMORY_CHUNK_SIZE` | `512` | Chunk size in tokens for markdown splitting (64–4096). Changing triggers automatic index rebuild |
