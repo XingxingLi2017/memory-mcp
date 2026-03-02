@@ -5,6 +5,7 @@
  */
 
 const DEFAULT_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
+const ENV_MODEL_PATH = process.env.MEMORY_MCP_MODEL_PATH;
 
 // Lazy-init state
 let llamaInstance: unknown = null;
@@ -34,7 +35,7 @@ async function ensureContext(): Promise<EmbeddingContext> {
     llamaInstance = await nodeLlamaCpp.getLlama({ logLevel: nodeLlamaCpp.LlamaLogLevel.error });
   }
   if (!embeddingModel) {
-    const modelPath = await nodeLlamaCpp.resolveModelFile(DEFAULT_MODEL);
+    const modelPath = ENV_MODEL_PATH ?? await nodeLlamaCpp.resolveModelFile(DEFAULT_MODEL);
     embeddingModel = await (llamaInstance as { loadModel(o: { modelPath: string }): Promise<unknown> }).loadModel({ modelPath });
   }
   if (!embeddingContext) {
@@ -94,8 +95,13 @@ export async function isEmbeddingAvailable(): Promise<boolean> {
   if (unavailable) return false;
   if (embeddingAvailableCache !== null) return embeddingAvailableCache;
   try {
-    const { resolveModelFile } = await import("node-llama-cpp");
-    await resolveModelFile(DEFAULT_MODEL);
+    if (ENV_MODEL_PATH) {
+      const { accessSync } = await import("fs");
+      accessSync(ENV_MODEL_PATH);
+    } else {
+      const { resolveModelFile } = await import("node-llama-cpp");
+      await resolveModelFile(DEFAULT_MODEL);
+    }
     embeddingAvailableCache = true;
     return true;
   } catch {
