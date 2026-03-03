@@ -204,7 +204,8 @@ server.tool(
     }
     if (!allowed && extraDirs) {
       for (const dir of extraDirs) {
-        const realDir = fs.realpathSync(dir);
+        let realDir: string;
+        try { realDir = fs.realpathSync(dir); } catch { continue; }
         const extraRel = path.relative(realDir, realPath).replace(/\\/g, "/");
         if (!extraRel.startsWith("..") && !path.isAbsolute(extraRel)) {
           allowed = true;
