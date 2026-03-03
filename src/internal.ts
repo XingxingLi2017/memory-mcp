@@ -38,8 +38,13 @@ export function buildExtraDirAliases(dirs: string[]): Map<string, string> {
     if (!hasCollision) break;
   }
 
+  // Disambiguate any remaining collisions with numeric suffixes
+  const finalSeen = new Map<string, number>();
   for (const entry of aliases) {
-    result.set(entry.dir, entry.segments.join("-"));
+    const base = entry.segments.join("-");
+    const count = finalSeen.get(base) ?? 0;
+    finalSeen.set(base, count + 1);
+    result.set(entry.dir, count === 0 ? base : `${base}-${count}`);
   }
   return result;
 }
