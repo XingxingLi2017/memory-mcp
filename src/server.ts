@@ -179,9 +179,19 @@ server.tool(
         : path.resolve(workspaceDir, relPath);
     }
 
-    // Security: allow workspace memory paths + extraDirs paths
+    // Security: resolve symlinks before checking path containment
+    let realPath: string;
+    try {
+      realPath = fs.realpathSync(absPath);
+    } catch {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ error: "file not found" }) }],
+        isError: true,
+      };
+    }
+
     let allowed = false;
-    const rel = path.relative(workspaceDir, absPath).replace(/\\/g, "/");
+    const rel = path.relative(workspaceDir, realPath).replace(/\\/g, "/");
     if (
       rel === "MEMORY.md" ||
       rel === "memory.md" ||
@@ -189,18 +199,20 @@ server.tool(
       rel === "memory.txt" ||
       rel.startsWith("memory/")
     ) {
-      allowed = true;
+      // Ensure it doesn't escape via ../ after the prefix
+      if (!rel.includes("..")) allowed = true;
     }
     if (!allowed && extraDirs) {
       for (const dir of extraDirs) {
-        const extraRel = path.relative(dir, absPath).replace(/\\/g, "/");
-        if (!extraRel.startsWith("..")) {
+        const realDir = fs.realpathSync(dir);
+        const extraRel = path.relative(realDir, realPath).replace(/\\/g, "/");
+        if (!extraRel.startsWith("..") && !path.isAbsolute(extraRel)) {
           allowed = true;
           break;
         }
       }
     }
-    if (!allowed || !MEMORY_EXTENSIONS.has(path.extname(absPath).toLowerCase())) {
+    if (!allowed || !MEMORY_EXTENSIONS.has(path.extname(realPath).toLowerCase())) {
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ error: "path not allowed" }) }],
         isError: true,
@@ -208,7 +220,7 @@ server.tool(
     }
 
     try {
-      const content = fs.readFileSync(absPath, "utf-8");
+      const content = fs.readFileSync(realPath, "utf-8");
       if (!from && !lines) {
         return {
           content: [{ type: "text" as const, text: JSON.stringify({ path: rel, text: content }) }],

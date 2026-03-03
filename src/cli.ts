@@ -83,8 +83,7 @@ function parsePositiveInt(val: string | undefined, name: string): number | undef
   if (!val) return undefined;
   const n = Number(val);
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
-    console.error(`Error: --${name} must be a positive integer, got "${val}"`);
-    process.exit(1);
+    throw new Error(`--${name} must be a positive integer, got "${val}"`);
   }
   return n;
 }
@@ -93,8 +92,7 @@ function parsePositiveFloat(val: string | undefined, name: string): number | und
   if (!val) return undefined;
   const n = Number(val);
   if (!Number.isFinite(n) || n < 0) {
-    console.error(`Error: --${name} must be a non-negative number, got "${val}"`);
-    process.exit(1);
+    throw new Error(`--${name} must be a non-negative number, got "${val}"`);
   }
   return n;
 }
@@ -111,45 +109,44 @@ async function main(): Promise<void> {
   const dbPath = resolveDbPath();
   const db = await openDatabase(dbPath, { chunkSize: resolveChunkSize() });
 
-  // Sync before search
-  const extraDirs = resolveExtraDirs();
-  await syncMemoryFiles(db, workspaceDir, { chunkSize: resolveChunkSize(), extraDirs });
-  // Best-effort embedding sync
-  try { await syncEmbeddings(db); } catch {}
+  try {
+    // Sync before search
+    const extraDirs = resolveExtraDirs();
+    await syncMemoryFiles(db, workspaceDir, { chunkSize: resolveChunkSize(), extraDirs });
+    // Best-effort embedding sync
+    try { await syncEmbeddings(db); } catch {}
 
-  if (command === "search") {
-    if (!query) {
-      console.error("Error: search requires a query argument");
-      process.exit(1);
+    if (command === "search") {
+      if (!query) {
+        throw new Error("search requires a query argument");
+      }
+      const maxResults = parsePositiveInt(opts["max-results"], "max-results") ?? 10;
+      const minScore = parsePositiveFloat(opts["min-score"], "min-score");
+      const tokenMax = parsePositiveInt(opts["token-max"], "token-max");
+      const results = await searchMemory(db, query, { maxResults, minScore, tokenMax });
+      console.log(JSON.stringify({ results, count: results.length }, null, 2));
+    } else if (command === "status") {
+      const fileCount = (db.prepare(`SELECT COUNT(*) as c FROM files`).get() as { c: number }).c;
+      const chunkCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks`).get() as { c: number }).c;
+      let vecCount = 0;
+      try { vecCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks_vec`).get() as { c: number }).c; } catch {}
+      console.log(JSON.stringify({
+        workspaceDir,
+        dbPath,
+        extraDirs: extraDirs ?? [],
+        files: fileCount,
+        chunks: chunkCount,
+        embeddedChunks: vecCount,
+      }, null, 2));
+    } else {
+      throw new Error(`Unknown command: ${command}`);
     }
-    const maxResults = parsePositiveInt(opts["max-results"], "max-results") ?? 10;
-    const minScore = parsePositiveFloat(opts["min-score"], "min-score");
-    const tokenMax = parsePositiveInt(opts["token-max"], "token-max");
-    const results = await searchMemory(db, query, { maxResults, minScore, tokenMax });
-    console.log(JSON.stringify({ results, count: results.length }, null, 2));
-  } else if (command === "status") {
-    const fileCount = (db.prepare(`SELECT COUNT(*) as c FROM files`).get() as { c: number }).c;
-    const chunkCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks`).get() as { c: number }).c;
-    let vecCount = 0;
-    try { vecCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks_vec`).get() as { c: number }).c; } catch {}
-    console.log(JSON.stringify({
-      workspaceDir,
-      dbPath,
-      extraDirs: extraDirs ?? [],
-      files: fileCount,
-      chunks: chunkCount,
-      embeddedChunks: vecCount,
-    }, null, 2));
-  } else {
-    console.error(`Unknown command: ${command}`);
-    printUsage();
-    process.exit(1);
+  } finally {
+    db.close();
   }
-
-  db.close();
 }
 
 main().catch((err) => {
-  console.error("memory-mcp CLI error:", err);
+  console.error("memory-mcp CLI error:", err instanceof Error ? err.message : err);
   process.exit(1);
 });
