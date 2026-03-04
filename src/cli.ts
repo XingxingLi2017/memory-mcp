@@ -23,7 +23,7 @@ Commands:
   status            Show index status
 
 Configuration:
-  Settings are read from ~/.copilot/memory-mcp.json (editable via "memory-mcp config set").
+  Settings are read from ~/memory-mcp.json (editable via "memory-mcp config set").
   Environment variables override config file values:
     MEMORY_WORKSPACE    Root directory (default: ~/.copilot)
     MEMORY_DB_PATH      SQLite database path

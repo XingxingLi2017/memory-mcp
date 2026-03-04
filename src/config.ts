@@ -50,9 +50,9 @@ export const CONFIG_FILENAME = "memory-mcp.json";
 // Config file I/O
 // ---------------------------------------------------------------------------
 
-/** Return the config file path for a given workspace (or the default workspace). */
-export function configFilePath(workspaceDir?: string): string {
-  return path.join(workspaceDir ?? DEFAULTS.workspace, CONFIG_FILENAME);
+/** Return the config file path (always ~/memory-mcp.json, cross-platform). */
+export function configFilePath(): string {
+  return path.join(HOME, CONFIG_FILENAME);
 }
 
 /** Read the config file. Returns {} if missing or invalid. */
@@ -137,15 +137,12 @@ let cachedConfig: MemoryConfig | null = null;
 export function loadConfig(): MemoryConfig {
   if (cachedConfig) return cachedConfig;
 
-  // 1. Read file config (need workspace first to find the file)
-  const envWorkspace = envString("MEMORY_WORKSPACE");
-  const fileForLookup = envWorkspace
-    ? configFilePath(envWorkspace)
-    : configFilePath();
-  const file = readConfigFile(fileForLookup);
+  // 1. Read file config (~/memory-mcp.json)
+  const file = readConfigFile();
 
   // 2. Merge: env > file > defaults
-  const workspace = envWorkspace ?? file.workspace ?? DEFAULTS.workspace;
+  const workspace =
+    envString("MEMORY_WORKSPACE") ?? file.workspace ?? DEFAULTS.workspace;
 
   const config: MemoryConfig = {
     workspace,

@@ -117,7 +117,7 @@ memory-mcp config reset
 memory-mcp config path
 ```
 
-Config is stored in `~/.copilot/memory-mcp.json`. Environment variables override config file values.
+Config is stored in `~/memory-mcp.json`. Environment variables override config file values.
 
 ## Environment Variables
 
@@ -132,7 +132,7 @@ Config is stored in `~/.copilot/memory-mcp.json`. Environment variables override
 | `MEMORY_SESSION_MAX` | `-1` | Max number of sessions to index, newest first (-1 = no limit, 0 = disable session indexing) |
 | `MEMORY_EXTRA_DIRS` | _(none)_ | Comma-separated extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
 
-**Priority**: environment variable > config file (`~/.copilot/memory-mcp.json`) > built-in defaults.
+**Priority**: environment variable > config file (`~/memory-mcp.json`) > built-in defaults.
 
 ## CLI
 

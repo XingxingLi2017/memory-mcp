@@ -279,7 +279,7 @@ function handleConfig(args: string[]): void {
   if (!sub || sub === "show") {
     // Show merged config
     const merged = loadConfig();
-    const filePath = configFilePath(merged.workspace);
+    const filePath = configFilePath();
     console.log(`Config file: ${filePath}\n`);
     console.log(JSON.stringify(merged, null, 2));
     return;
