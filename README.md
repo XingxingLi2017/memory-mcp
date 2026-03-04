@@ -39,7 +39,7 @@ Vector search uses [node-llama-cpp](https://github.com/withcatai/node-llama-cpp)
 
 If they fail to install (e.g. missing build tools), the server still works with FTS5-only search — no manual intervention needed.
 
-The default embedding model ([embeddinggemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF), ~328 MB) is downloaded automatically on first use to `~/.node-llama-cpp/models/`. You can swap it via the `MEMORY_MCP_MODEL` environment variable (see [Environment Variables](#environment-variables)).
+The default embedding model ([embeddinggemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF), ~328 MB) is downloaded automatically on first use to `~/.node-llama-cpp/models/`. You can swap it via config: `memory-mcp config set model /path/to/model.gguf` (see [Configuration](#configuration)).
 
 ### Windows: Known Issue with Prebuilt Binaries
 
@@ -94,7 +94,8 @@ The host CLI will automatically search these files before answering questions ab
 6. Search runs both FTS5 (BM25 ranking) and vector (cosine similarity) in parallel
 7. Results are **min-max normalized** then merged with 50/50 weighting
 8. Access-count boost gently promotes frequently retrieved chunks
-9. Falls back to LIKE search if FTS5 is unavailable
+9. Top-level `MEMORY.md` results receive a score boost (×1.3) for long-term memory priority
+10. Falls back to LIKE search if FTS5 is unavailable
 
 ## Configuration
 
@@ -144,9 +145,20 @@ memory-mcp-cli search "query" --max-results 10 --min-score 0.1
 memory-mcp-cli status
 ```
 
+All config keys can be temporarily overridden via CLI flags:
+
+```bash
+memory-mcp-cli search "query" --workspace /tmp/alt-memory
+memory-mcp-cli status --chunk-size 1024 --session-days 7
+```
+
 Or run directly: `node dist/cli.js search "query"`
 
 Output is JSON to stdout, suitable for piping into other tools.
+
+## Upgrading
+
+When upgrading from a version that used `~/.copilot/` or `~/.claude/` as the workspace, `memory-mcp setup` (or the MCP server on first start) will automatically copy your memory files to `~/.memory-mcp-workdir/`. Original files are preserved — remove them manually when ready.
 
 ## Uninstall
 

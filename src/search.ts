@@ -184,10 +184,12 @@ export async function searchMemory(
     results = searchLike(db, cleaned, maxResults, snippetMaxChars, allowedPaths);
   }
 
+  // Boost MEMORY.md before truncation so it isn't cut by maxResults
+  applyMemoryFileBoost(results);
+
   results = results.slice(0, maxResults);
   bumpAccessCount(db, results);
   const boosted = applyAccessBoost(db, results);
-  applyMemoryFileBoost(boosted);
 
   // Tag session chunks with distillation hint (caller decides rendering)
   for (const r of boosted) {

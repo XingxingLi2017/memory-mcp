@@ -96,14 +96,15 @@ export function saveConfigFile(partial: MemoryConfigFile, filePath?: string): vo
   fs.writeFileSync(p, JSON.stringify(partial, null, 2) + "\n", "utf-8");
 }
 
-/** Delete the config file (reset to defaults). */
+/** Delete the config file (reset to defaults). Returns true if deleted. */
 export function deleteConfigFile(filePath?: string): boolean {
   const p = filePath ?? configFilePath();
   try {
     fs.unlinkSync(p);
     return true;
-  } catch {
-    return false;
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
   }
 }
 
@@ -111,20 +112,15 @@ export function deleteConfigFile(filePath?: string): boolean {
 // Load config (file > defaults)
 // ---------------------------------------------------------------------------
 
-let cachedConfig: MemoryConfig | null = null;
-
 /**
  * Load and merge configuration.
  * Priority: overrides > config file > defaults.
- * The result is cached for the process lifetime (only when no overrides are given).
  */
 export function loadConfig(overrides?: MemoryConfigFile, configPath?: string): MemoryConfig {
-  if (!overrides && !configPath && cachedConfig) return cachedConfig;
-
   const file = readConfigFile(configPath);
   const workspace = overrides?.workspace ?? file.workspace ?? DEFAULTS.workspace;
 
-  const config: MemoryConfig = {
+  return {
     workspace,
     dbPath: overrides?.dbPath ?? file.dbPath ?? path.join(workspace, "memory.db"),
     chunkSize: overrides?.chunkSize ?? file.chunkSize ?? DEFAULTS.chunkSize,
@@ -135,17 +131,6 @@ export function loadConfig(overrides?: MemoryConfigFile, configPath?: string): M
     extraDirs: overrides?.extraDirs ?? file.extraDirs ?? DEFAULTS.extraDirs,
     model: overrides?.model ?? file.model ?? DEFAULTS.model,
   };
-
-  // Only cache when using default config (no overrides)
-  if (!overrides && !configPath) {
-    cachedConfig = config;
-  }
-  return config;
-}
-
-/** Reset the cached config (for testing or after config file changes). */
-export function resetConfigCache(): void {
-  cachedConfig = null;
 }
 
 /**
@@ -154,4 +139,84 @@ export function resetConfigCache(): void {
  */
 export function resolvedExtraDirs(config: MemoryConfig): string[] | undefined {
   return config.extraDirs.length > 0 ? config.extraDirs : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Migration from legacy directories (~/.copilot, ~/.claude)
+// ---------------------------------------------------------------------------
+
+const MEMORY_ROOT_FILES = ["MEMORY.md", "memory.md", "MEMORY.txt", "memory.txt"];
+
+function copyIfMissing(src: string, dest: string): boolean {
+  if (fs.existsSync(dest)) return false;
+  const dir = path.dirname(dest);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(src, dest);
+  return true;
+}
+
+function copyDirMerge(srcDir: string, destDir: string): number {
+  if (!fs.existsSync(srcDir)) return 0;
+  let count = 0;
+  const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(srcDir, entry.name);
+    const destPath = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      count += copyDirMerge(srcPath, destPath);
+    } else if (entry.isFile()) {
+      if (copyIfMissing(srcPath, destPath)) count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Migrate memory files from legacy directories (~/.copilot, ~/.claude) to the new workdir.
+ * Only runs if the new workdir has no MEMORY.md and no memory/ directory.
+ * Safe to call from both setup.ts and server.ts.
+ */
+export function migrateFromLegacyDirs(workspaceDir: string): void {
+  const hasMemoryFile = MEMORY_ROOT_FILES.some((f) => fs.existsSync(path.join(workspaceDir, f)));
+  const hasMemoryDir = fs.existsSync(path.join(workspaceDir, "memory"));
+  if (hasMemoryFile || hasMemoryDir) return;
+
+  const legacyDirs = [
+    path.join(HOME, ".copilot"),
+    path.join(HOME, ".claude"),
+  ];
+
+  let migrated = false;
+
+  for (const legacyDir of legacyDirs) {
+    if (!fs.existsSync(legacyDir)) continue;
+    const label = path.basename(legacyDir);
+
+    for (const file of MEMORY_ROOT_FILES) {
+      const src = path.join(legacyDir, file);
+      if (fs.existsSync(src) && copyIfMissing(src, path.join(workspaceDir, file))) {
+        if (!migrated) {
+          console.error(`[memory-mcp] Migrating memory files to ${workspaceDir}:`);
+          migrated = true;
+        }
+        console.error(`[memory-mcp]   ✓ Copied ${file} from ~/${label}/`);
+      }
+    }
+
+    const srcMemDir = path.join(legacyDir, "memory");
+    if (fs.existsSync(srcMemDir)) {
+      const count = copyDirMerge(srcMemDir, path.join(workspaceDir, "memory"));
+      if (count > 0) {
+        if (!migrated) {
+          console.error(`[memory-mcp] Migrating memory files to ${workspaceDir}:`);
+          migrated = true;
+        }
+        console.error(`[memory-mcp]   ✓ Copied memory/ (${count} files) from ~/${label}/`);
+      }
+    }
+  }
+
+  if (migrated) {
+    console.error("[memory-mcp]   Note: Original files retained. Remove manually when ready.");
+  }
 }

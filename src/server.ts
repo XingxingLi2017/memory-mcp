@@ -9,9 +9,16 @@ import { openDatabase } from "./db.js";
 import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
 import { MEMORY_EXTENSIONS, hashText, buildExtraDirAliases } from "./internal.js";
-import { loadConfig, resolvedExtraDirs } from "./config.js";
+import { loadConfig, resolvedExtraDirs, migrateFromLegacyDirs } from "./config.js";
 
 const config = loadConfig();
+
+// Auto-migrate from legacy dirs on first server start (non-fatal)
+try {
+  migrateFromLegacyDirs(config.workspace);
+} catch (err) {
+  console.error("[memory-mcp] migration failed (non-fatal):", err);
+}
 
 const server = new McpServer({
   name: "memory",

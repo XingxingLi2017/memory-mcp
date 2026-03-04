@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   loadConfig, readConfigFile, saveConfigFile, deleteConfigFile,
-  configFilePath, DEFAULTS, resetConfigCache,
+  configFilePath, DEFAULTS, migrateFromLegacyDirs,
   type MemoryConfig, type MemoryConfigFile,
 } from "./config.js";
 
@@ -265,98 +265,6 @@ function uninstall(profile: TargetProfile): void {
 }
 
 // ---------------------------------------------------------------------------
-// Migration from legacy directories (~/.copilot, ~/.claude)
-// ---------------------------------------------------------------------------
-
-/** Top-level memory files to look for in legacy dirs. */
-const MEMORY_ROOT_FILES = ["MEMORY.md", "memory.md", "MEMORY.txt", "memory.txt"];
-
-/**
- * Copy a file if it doesn't already exist at the destination.
- * Returns true if copied.
- */
-function copyIfMissing(src: string, dest: string): boolean {
-  if (fs.existsSync(dest)) return false;
-  const dir = path.dirname(dest);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.copyFileSync(src, dest);
-  return true;
-}
-
-/**
- * Recursively copy directory contents, skipping files that already exist.
- * Returns number of files copied.
- */
-function copyDirMerge(srcDir: string, destDir: string): number {
-  if (!fs.existsSync(srcDir)) return 0;
-  let count = 0;
-  const entries = fs.readdirSync(srcDir, { withFileTypes: true });
-  for (const entry of entries) {
-    const srcPath = path.join(srcDir, entry.name);
-    const destPath = path.join(destDir, entry.name);
-    if (entry.isDirectory()) {
-      count += copyDirMerge(srcPath, destPath);
-    } else if (entry.isFile()) {
-      if (copyIfMissing(srcPath, destPath)) count++;
-    }
-  }
-  return count;
-}
-
-/**
- * Migrate memory files from legacy directories to the new workdir.
- * Only runs if the new workdir has no MEMORY.md and no memory/ directory.
- */
-function migrateFromLegacyDirs(workspaceDir: string): void {
-  // Skip if workspace already has content
-  const hasMemoryFile = MEMORY_ROOT_FILES.some((f) => fs.existsSync(path.join(workspaceDir, f)));
-  const hasMemoryDir = fs.existsSync(path.join(workspaceDir, "memory"));
-  if (hasMemoryFile || hasMemoryDir) return;
-
-  const home = getHomeDir();
-  const legacyDirs = [
-    path.join(home, ".copilot"),
-    path.join(home, ".claude"),
-  ];
-
-  let migrated = false;
-
-  for (const legacyDir of legacyDirs) {
-    if (!fs.existsSync(legacyDir)) continue;
-    const label = path.basename(legacyDir);
-
-    // Copy root memory files
-    for (const file of MEMORY_ROOT_FILES) {
-      const src = path.join(legacyDir, file);
-      if (fs.existsSync(src) && copyIfMissing(src, path.join(workspaceDir, file))) {
-        if (!migrated) {
-          console.log(`Migrating memory files to ${workspaceDir}:`);
-          migrated = true;
-        }
-        console.log(`  ✓ Copied ${file} from ~/${label}/`);
-      }
-    }
-
-    // Copy memory/ directory
-    const srcMemDir = path.join(legacyDir, "memory");
-    if (fs.existsSync(srcMemDir)) {
-      const count = copyDirMerge(srcMemDir, path.join(workspaceDir, "memory"));
-      if (count > 0) {
-        if (!migrated) {
-          console.log(`Migrating memory files to ${workspaceDir}:`);
-          migrated = true;
-        }
-        console.log(`  ✓ Copied memory/ (${count} files) from ~/${label}/`);
-      }
-    }
-  }
-
-  if (migrated) {
-    console.log("  Note: Original files retained. Remove manually when ready.\n");
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Config command
 // ---------------------------------------------------------------------------
 
@@ -437,6 +345,18 @@ function handleConfig(args: string[]): void {
         console.error(`${key} must be a number, got "${value}"`);
         process.exit(1);
       }
+      // Range validation
+      const ranges: Record<string, [number, number]> = {
+        chunkSize: [64, 4096],
+        tokenMax: [100, 16384],
+        sessionDays: [0, Infinity],
+        sessionMax: [-1, Infinity],
+      };
+      const [min, max] = ranges[key]!;
+      if (n < min || n > max) {
+        console.error(`${key} must be between ${min} and ${max === Infinity ? "∞" : max}, got ${n}`);
+        process.exit(1);
+      }
       existing[key] = n;
     } else {
       // string fields: workspace, dbPath, model
@@ -444,7 +364,6 @@ function handleConfig(args: string[]): void {
     }
 
     saveConfigFile(existing, filePath);
-    resetConfigCache();
     console.log(`✓ ${key} = ${JSON.stringify(existing[key])}`);
     console.log(`  Saved to ${filePath}`);
     return;
