@@ -8,7 +8,7 @@ import fs from "node:fs";
 import { openDatabase } from "./db.js";
 import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
-import { MEMORY_EXTENSIONS, hashText } from "./internal.js";
+import { MEMORY_EXTENSIONS, hashText, buildExtraDirAliases } from "./internal.js";
 
 const DEFAULT_WORKSPACE = path.join(
   process.env.HOME ?? process.env.USERPROFILE ?? "~",
@@ -59,6 +59,13 @@ function resolveSessionMax(): number {
   return -1; // no count limit
 }
 
+function resolveExtraDirs(): string[] | undefined {
+  const val = process.env.MEMORY_EXTRA_DIRS;
+  if (!val) return undefined;
+  const dirs = val.split(",").map((d) => d.trim()).filter(Boolean).map((d) => path.resolve(d));
+  return dirs.length > 0 ? dirs : undefined;
+}
+
 const server = new McpServer({
   name: "memory",
   version: "0.1.0",
@@ -82,7 +89,7 @@ async function ensureSynced(): Promise<void> {
   const workspaceDir = resolveWorkspaceDir();
   try {
     if (memoryDue) {
-      await syncMemoryFiles(db, workspaceDir, { chunkSize: resolveChunkSize() });
+      await syncMemoryFiles(db, workspaceDir, { chunkSize: resolveChunkSize(), extraDirs: resolveExtraDirs() });
       lastSyncAt = Date.now();
     }
     if (sessionDue) {
@@ -141,19 +148,72 @@ server.tool(
   },
   async ({ path: relPath, from, lines }) => {
     const workspaceDir = resolveWorkspaceDir();
-    const absPath = path.isAbsolute(relPath)
-      ? path.resolve(relPath)
-      : path.resolve(workspaceDir, relPath);
+    const extraDirs = resolveExtraDirs();
 
-    // Security: only allow memory paths
-    const rel = path.relative(workspaceDir, absPath).replace(/\\/g, "/");
-    const allowed =
+    // Resolve extra: prefix paths using alias → directory mapping
+    let absPath: string;
+    if (relPath.startsWith("extra:") && extraDirs) {
+      const rest = relPath.slice("extra:".length); // e.g. a-vault/notes/foo.md
+      const aliases = buildExtraDirAliases(extraDirs);
+      // Find alias match: try longest alias prefix first
+      let matched: string | undefined;
+      let subPath = "";
+      for (const [dir, alias] of aliases) {
+        if (rest.startsWith(alias + "/")) {
+          matched = dir;
+          subPath = rest.slice(alias.length + 1);
+          break;
+        }
+      }
+      if (matched) {
+        absPath = path.resolve(matched, subPath);
+      } else {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ error: "path not allowed" }) }],
+          isError: true,
+        };
+      }
+    } else {
+      absPath = path.isAbsolute(relPath)
+        ? path.resolve(relPath)
+        : path.resolve(workspaceDir, relPath);
+    }
+
+    // Security: resolve symlinks before checking path containment
+    let realPath: string;
+    try {
+      realPath = fs.realpathSync(absPath);
+    } catch {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ error: "file not found" }) }],
+        isError: true,
+      };
+    }
+
+    let allowed = false;
+    const rel = path.relative(workspaceDir, realPath).replace(/\\/g, "/");
+    if (
       rel === "MEMORY.md" ||
       rel === "memory.md" ||
       rel === "MEMORY.txt" ||
       rel === "memory.txt" ||
-      rel.startsWith("memory/");
-    if (!allowed || !MEMORY_EXTENSIONS.has(path.extname(absPath).toLowerCase())) {
+      rel.startsWith("memory/")
+    ) {
+      // Ensure it doesn't escape via ../ after the prefix
+      if (!rel.includes("..")) allowed = true;
+    }
+    if (!allowed && extraDirs) {
+      for (const dir of extraDirs) {
+        let realDir: string;
+        try { realDir = fs.realpathSync(dir); } catch { continue; }
+        const extraRel = path.relative(realDir, realPath).replace(/\\/g, "/");
+        if (!extraRel.startsWith("..") && !path.isAbsolute(extraRel)) {
+          allowed = true;
+          break;
+        }
+      }
+    }
+    if (!allowed || !MEMORY_EXTENSIONS.has(path.extname(realPath).toLowerCase())) {
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ error: "path not allowed" }) }],
         isError: true,
@@ -161,7 +221,7 @@ server.tool(
     }
 
     try {
-      const content = fs.readFileSync(absPath, "utf-8");
+      const content = fs.readFileSync(realPath, "utf-8");
       if (!from && !lines) {
         return {
           content: [{ type: "text" as const, text: JSON.stringify({ path: rel, text: content }) }],

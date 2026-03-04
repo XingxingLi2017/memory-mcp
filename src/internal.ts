@@ -2,6 +2,53 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+/**
+ * Build unique aliases for extra directories.
+ * Uses basename when unique; appends parent segments to disambiguate collisions.
+ * E.g. ["/a/vault", "/b/vault"] → { "/a/vault": "a-vault", "/b/vault": "b-vault" }
+ */
+export function buildExtraDirAliases(dirs: string[]): Map<string, string> {
+  const result = new Map<string, string>();
+  if (dirs.length === 0) return result;
+
+  // Start with basenames
+  const aliases = dirs.map((d) => ({ dir: d, segments: [path.basename(d)] }));
+
+  // Resolve collisions by prepending parent segments
+  for (let depth = 0; depth < 10; depth++) {
+    const seen = new Map<string, number[]>();
+    for (let i = 0; i < aliases.length; i++) {
+      const key = aliases[i]!.segments.join("-");
+      if (!seen.has(key)) seen.set(key, []);
+      seen.get(key)!.push(i);
+    }
+    let hasCollision = false;
+    for (const [, indices] of seen) {
+      if (indices.length <= 1) continue;
+      hasCollision = true;
+      for (const idx of indices) {
+        const entry = aliases[idx]!;
+        const parts = entry.dir.split(path.sep).filter(Boolean);
+        const currentDepth = entry.segments.length;
+        if (currentDepth < parts.length) {
+          entry.segments.unshift(parts[parts.length - currentDepth - 1]!);
+        }
+      }
+    }
+    if (!hasCollision) break;
+  }
+
+  // Disambiguate any remaining collisions with numeric suffixes
+  const finalSeen = new Map<string, number>();
+  for (const entry of aliases) {
+    const base = entry.segments.join("-");
+    const count = finalSeen.get(base) ?? 0;
+    finalSeen.set(base, count + 1);
+    result.set(entry.dir, count === 0 ? base : `${base}-${count}`);
+  }
+  return result;
+}
+
 /** File extensions indexed by the memory system. */
 export const MEMORY_EXTENSIONS = new Set([".md", ".txt", ".json", ".jsonl", ".yaml", ".yml"]);
 
@@ -35,7 +82,7 @@ export function hashText(value: string): string {
 /**
  * Discover all .md files in MEMORY.md, memory.md, and memory/ directory.
  */
-export async function listMemoryFiles(workspaceDir: string): Promise<string[]> {
+export async function listMemoryFiles(workspaceDir: string, extraDirs?: string[]): Promise<string[]> {
   const result: string[] = [];
   const skippedSymlinks: string[] = [];
 
@@ -60,6 +107,18 @@ export async function listMemoryFiles(workspaceDir: string): Promise<string[]> {
       await walkDir(memoryDir, result, skippedSymlinks);
     }
   } catch {}
+
+  // Walk extra directories (e.g. Obsidian vault)
+  if (extraDirs) {
+    for (const dir of extraDirs) {
+      try {
+        const stat = await fs.lstat(dir);
+        if (stat.isDirectory() && !stat.isSymbolicLink()) {
+          await walkDir(dir, result, skippedSymlinks);
+        }
+      } catch {}
+    }
+  }
 
   if (skippedSymlinks.length > 0) {
     console.error(`[memory-mcp] Skipped ${skippedSymlinks.length} symlink(s): ${skippedSymlinks.join(", ")}`);
@@ -99,11 +158,23 @@ async function walkDir(dir: string, files: string[], skippedSymlinks?: string[])
 export async function buildFileEntry(
   absPath: string,
   workspaceDir: string,
+  extraDirAliases?: Map<string, string>,
 ): Promise<MemoryFileEntry> {
   const stat = await fs.stat(absPath);
   const content = await fs.readFile(absPath, "utf-8");
+  // For files under extraDirs, compute path relative to their own root with alias prefix
+  let relPath = path.relative(workspaceDir, absPath).replace(/\\/g, "/");
+  if (extraDirAliases && relPath.startsWith("..")) {
+    for (const [dir, alias] of extraDirAliases) {
+      const rel = path.relative(dir, absPath).replace(/\\/g, "/");
+      if (!rel.startsWith("..")) {
+        relPath = `extra:${alias}/${rel}`;
+        break;
+      }
+    }
+  }
   return {
-    path: path.relative(workspaceDir, absPath).replace(/\\/g, "/"),
+    path: relPath,
     absPath,
     mtimeMs: stat.mtimeMs,
     size: stat.size,

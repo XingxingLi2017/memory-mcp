@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/server.js",
   "bin": {
-    "memory-mcp": "dist/setup.js"
+    "memory-mcp": "dist/setup.js",
+    "memory-mcp-cli": "dist/cli.js"
   },
   "files": [
     "dist",
