@@ -1,6 +1,6 @@
 /**
  * Local embedding provider using node-llama-cpp.
- * Model is configurable via config file or MEMORY_MCP_MODEL env var.
+ * Model is configurable via config file (~/.memory-mcp-workdir/memory-mcp.json).
  * Defaults to embeddinggemma-300M. Lazy-loaded on first embedding request.
  * Gracefully unavailable if node-llama-cpp is not installed.
  */
