@@ -35,8 +35,10 @@ Global flags (override config for this run):
   --model <path>        Override embedding model
 
 Configuration:
-  All settings are read from ~/.memory-mcp-workdir/memory-mcp.json (editable via "memory-mcp config set").
-  Run "memory-mcp config" to view current settings.`);
+  All settings are read from ~/.memory-mcp-workdir/memory-mcp.json.
+  Config is managed via the "memory-mcp" command (not memory-mcp-cli):
+    memory-mcp config            Show current settings
+    memory-mcp config set <k> <v> Set a value`);
 }
 
 function parseArgs(args: string[]): { command: string; query?: string; opts: Record<string, string> } {
@@ -59,7 +61,7 @@ function parseArgs(args: string[]): { command: string; query?: string; opts: Rec
   return { command, query, opts };
 }
 
-function parsePositiveInt(val: string | undefined, name: string): number | undefined {
+function parseNonNegativeInt(val: string | undefined, name: string): number | undefined {
   if (!val) return undefined;
   const n = Number(val);
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
@@ -153,9 +155,9 @@ async function main(): Promise<void> {
       if (!query) {
         throw new Error("search requires a query argument");
       }
-      const maxResults = parsePositiveInt(rest["max-results"], "max-results") ?? 10;
+      const maxResults = parseNonNegativeInt(rest["max-results"], "max-results") ?? 10;
       const minScore = parsePositiveFloat(rest["min-score"], "min-score");
-      const tokenMax = parsePositiveInt(rest["token-max"], "token-max") ?? config.tokenMax;
+      const tokenMax = parseNonNegativeInt(rest["token-max"], "token-max") ?? config.tokenMax;
       const results = await searchMemory(db, query, { maxResults, minScore, tokenMax });
       console.log(JSON.stringify({ results, count: results.length }, null, 2));
     } else if (command === "status") {

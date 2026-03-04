@@ -117,7 +117,7 @@ memory-mcp config reset
 memory-mcp config path
 ```
 
-Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$HOME` on Linux/macOS, `%USERPROFILE%` on Windows).
+Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$HOME` on Linux/macOS, `%USERPROFILE%` on Windows). Changes take effect on next server restart.
 
 ### Config Keys
 
@@ -159,6 +159,8 @@ Output is JSON to stdout, suitable for piping into other tools.
 ## Upgrading
 
 When upgrading from a version that used `~/.copilot/` or `~/.claude/` as the workspace, `memory-mcp setup` (or the MCP server on first start) will automatically copy your memory files to `~/.memory-mcp-workdir/`. Original files are preserved — remove them manually when ready.
+
+**Breaking change:** All `MEMORY_*` environment variables have been removed. Configuration is now managed entirely through the config file (`~/.memory-mcp-workdir/memory-mcp.json`). Use `memory-mcp config set <key> <value>` to migrate your settings.
 
 ## Uninstall
 

@@ -112,9 +112,16 @@ export function deleteConfigFile(filePath?: string): boolean {
 // Load config (file > defaults)
 // ---------------------------------------------------------------------------
 
+/** Clamp a number within [min, max], falling back to fallback if invalid. */
+function clamp(val: number | undefined, min: number, max: number, fallback: number): number {
+  if (val === undefined || !Number.isFinite(val)) return fallback;
+  return Math.max(min, Math.min(max, val));
+}
+
 /**
  * Load and merge configuration.
  * Priority: overrides > config file > defaults.
+ * Numeric fields are clamped to valid ranges (guards against hand-edited JSON).
  */
 export function loadConfig(overrides?: MemoryConfigFile, configPath?: string): MemoryConfig {
   const file = readConfigFile(configPath);
@@ -123,10 +130,10 @@ export function loadConfig(overrides?: MemoryConfigFile, configPath?: string): M
   return {
     workspace,
     dbPath: overrides?.dbPath ?? file.dbPath ?? path.join(workspace, "memory.db"),
-    chunkSize: overrides?.chunkSize ?? file.chunkSize ?? DEFAULTS.chunkSize,
-    tokenMax: overrides?.tokenMax ?? file.tokenMax ?? DEFAULTS.tokenMax,
-    sessionDays: overrides?.sessionDays ?? file.sessionDays ?? DEFAULTS.sessionDays,
-    sessionMax: overrides?.sessionMax ?? file.sessionMax ?? DEFAULTS.sessionMax,
+    chunkSize: clamp(overrides?.chunkSize ?? file.chunkSize, 64, 4096, DEFAULTS.chunkSize),
+    tokenMax: clamp(overrides?.tokenMax ?? file.tokenMax, 100, 16384, DEFAULTS.tokenMax),
+    sessionDays: clamp(overrides?.sessionDays ?? file.sessionDays, 0, Infinity, DEFAULTS.sessionDays),
+    sessionMax: clamp(overrides?.sessionMax ?? file.sessionMax, -1, Infinity, DEFAULTS.sessionMax),
     sessionDirs: overrides?.sessionDirs ?? file.sessionDirs ?? DEFAULTS.sessionDirs,
     extraDirs: overrides?.extraDirs ?? file.extraDirs ?? DEFAULTS.extraDirs,
     model: overrides?.model ?? file.model ?? DEFAULTS.model,

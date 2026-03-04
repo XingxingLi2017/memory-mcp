@@ -407,6 +407,7 @@ function applyAccessBoost(db: Database.Database, results: SearchResult[]): Searc
 const BOOSTED_PATHS = new Set(["MEMORY.md", "memory.md", "MEMORY.txt", "memory.txt"]);
 
 /** Boost factor for top-level memory file results (score × 1.3). */
+// TODO: consider making this configurable for users who want to boost other files (e.g. extra dirs)
 const MEMORY_FILE_BOOST = 0.3;
 
 /**

@@ -12,8 +12,11 @@ function isHfUri(s: string): boolean {
   return s.startsWith("hf:");
 }
 
+/** Cached model spec — read from config once on first use. */
+let cachedModelSpec: string | null = null;
 function resolveModelSpec(): string {
-  return loadConfig().model;
+  if (!cachedModelSpec) cachedModelSpec = loadConfig().model;
+  return cachedModelSpec;
 }
 
 // Lazy-init state
