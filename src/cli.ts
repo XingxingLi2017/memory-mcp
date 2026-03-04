@@ -23,13 +23,8 @@ Commands:
   status            Show index status
 
 Configuration:
-  Settings are read from ~/memory-mcp.json (editable via "memory-mcp config set").
-  Environment variables override config file values:
-    MEMORY_WORKSPACE    Root directory (default: ~/.copilot)
-    MEMORY_DB_PATH      SQLite database path
-    MEMORY_EXTRA_DIRS   Comma-separated extra directories to index
-    MEMORY_MCP_MODEL    Embedding model (HF URI or local path)
-    MEMORY_CHUNK_SIZE   Chunk size in tokens (default: 512)`);
+  All settings are read from ~/memory-mcp.json (editable via "memory-mcp config set").
+  Run "memory-mcp config" to view current settings.`);
 }
 
 function parseArgs(args: string[]): { command: string; query?: string; opts: Record<string, string> } {

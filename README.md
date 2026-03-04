@@ -102,7 +102,7 @@ The host CLI will automatically search these files before answering questions ab
 All settings have sensible defaults and work out of the box. To customize, use the config command:
 
 ```bash
-# Show current config (merged: env var > config file > defaults)
+# Show current config
 memory-mcp config
 
 # Set a value
@@ -117,22 +117,20 @@ memory-mcp config reset
 memory-mcp config path
 ```
 
-Config is stored in `~/memory-mcp.json`. Environment variables override config file values.
+Config is stored in `~/memory-mcp.json` (cross-platform: `$HOME` on Linux/macOS, `%USERPROFILE%` on Windows).
 
-## Environment Variables
+### Config Keys
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MEMORY_MCP_MODEL` | `hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf` | Embedding model. Accepts a HuggingFace URI (`hf:org/repo/file.gguf`) for auto-download, or a local file path (`/path/to/model.gguf`) |
-| `MEMORY_WORKSPACE` | `~/.copilot` | Root directory to scan for memory files |
-| `MEMORY_DB_PATH` | `~/.copilot/memory.db` | Path to SQLite database |
-| `MEMORY_CHUNK_SIZE` | `512` | Chunk size in tokens for markdown splitting (64–4096). Changing triggers automatic index rebuild |
-| `MEMORY_TOKEN_MAX` | `4096` | Default max tokens per search response (100–16384). Controls snippet length and result count |
-| `MEMORY_SESSION_DAYS` | `30` | Only index session transcripts from the last N days (0 = index all) |
-| `MEMORY_SESSION_MAX` | `-1` | Max number of sessions to index, newest first (-1 = no limit, 0 = disable session indexing) |
-| `MEMORY_EXTRA_DIRS` | _(none)_ | Comma-separated extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
-
-**Priority**: environment variable > config file (`~/memory-mcp.json`) > built-in defaults.
+| Key | Default | Description |
+|-----|---------|-------------|
+| `workspace` | `~/.copilot` | Root directory to scan for memory files |
+| `dbPath` | `<workspace>/memory.db` | Path to SQLite database |
+| `chunkSize` | `512` | Chunk size in tokens for markdown splitting (64–4096). Changing triggers automatic index rebuild |
+| `tokenMax` | `4096` | Default max tokens per search response (100–16384). Controls snippet length and result count |
+| `sessionDays` | `30` | Only index session transcripts from the last N days (0 = index all) |
+| `sessionMax` | `-1` | Max number of sessions to index, newest first (-1 = no limit, 0 = disable session indexing) |
+| `extraDirs` | `[]` | Extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
+| `model` | `hf:ggml-org/embeddinggemma-300M-GGUF/...` | Embedding model. Accepts a HuggingFace URI (`hf:org/repo/file.gguf`) for auto-download, or a local file path (`/path/to/model.gguf`) |
 
 ## CLI
 

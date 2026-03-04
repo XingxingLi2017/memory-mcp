@@ -1,7 +1,8 @@
 /**
  * Centralized configuration for memory-mcp.
  *
- * Priority: environment variable > config file (~/.copilot/memory-mcp.json) > defaults.
+ * Priority: config file (~/memory-mcp.json) > built-in defaults.
+ * No environment variables — all settings go through the config file.
  */
 
 import fs from "node:fs";
@@ -92,88 +93,31 @@ export function deleteConfigFile(filePath?: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Env var parsing helpers
-// ---------------------------------------------------------------------------
-
-function envString(key: string): string | undefined {
-  const val = process.env[key];
-  return val || undefined; // treat empty string as undefined
-}
-
-function envInt(key: string, min: number, max: number): number | undefined {
-  const raw = envString(key);
-  if (raw === undefined) return undefined;
-  const n = Number(raw);
-  if (Number.isFinite(n) && n >= min && n <= max) return n;
-  return undefined;
-}
-
-function envIntLoose(key: string, min: number): number | undefined {
-  const raw = envString(key);
-  if (raw === undefined) return undefined;
-  const n = Number(raw);
-  if (Number.isFinite(n) && n >= min) return n;
-  return undefined;
-}
-
-function envStringArray(key: string): string[] | undefined {
-  const raw = envString(key);
-  if (raw === undefined) return undefined;
-  const items = raw.split(",").map((d) => d.trim()).filter(Boolean).map((d) => path.resolve(d));
-  return items.length > 0 ? items : undefined;
-}
-
-// ---------------------------------------------------------------------------
-// Load config (merged: env > file > defaults)
+// Load config (file > defaults)
 // ---------------------------------------------------------------------------
 
 let cachedConfig: MemoryConfig | null = null;
 
 /**
  * Load and merge configuration.
- * Priority: env var > config file > defaults.
+ * Priority: config file > defaults.
  * The result is cached for the process lifetime.
  */
 export function loadConfig(): MemoryConfig {
   if (cachedConfig) return cachedConfig;
 
-  // 1. Read file config (~/memory-mcp.json)
   const file = readConfigFile();
-
-  // 2. Merge: env > file > defaults
-  const workspace =
-    envString("MEMORY_WORKSPACE") ?? file.workspace ?? DEFAULTS.workspace;
+  const workspace = file.workspace ?? DEFAULTS.workspace;
 
   const config: MemoryConfig = {
     workspace,
-    dbPath:
-      envString("MEMORY_DB_PATH") ??
-      file.dbPath ??
-      path.join(workspace, "memory.db"),
-    chunkSize:
-      envInt("MEMORY_CHUNK_SIZE", 64, 4096) ??
-      file.chunkSize ??
-      DEFAULTS.chunkSize,
-    tokenMax:
-      envInt("MEMORY_TOKEN_MAX", 100, 16384) ??
-      file.tokenMax ??
-      DEFAULTS.tokenMax,
-    sessionDays:
-      envIntLoose("MEMORY_SESSION_DAYS", 0) ??
-      file.sessionDays ??
-      DEFAULTS.sessionDays,
-    sessionMax:
-      envIntLoose("MEMORY_SESSION_MAX", -1) ??
-      file.sessionMax ??
-      DEFAULTS.sessionMax,
-    extraDirs:
-      envStringArray("MEMORY_EXTRA_DIRS") ??
-      file.extraDirs ??
-      DEFAULTS.extraDirs,
-    model:
-      envString("MEMORY_MCP_MODEL") ??
-      file.model ??
-      DEFAULTS.model,
+    dbPath: file.dbPath ?? path.join(workspace, "memory.db"),
+    chunkSize: file.chunkSize ?? DEFAULTS.chunkSize,
+    tokenMax: file.tokenMax ?? DEFAULTS.tokenMax,
+    sessionDays: file.sessionDays ?? DEFAULTS.sessionDays,
+    sessionMax: file.sessionMax ?? DEFAULTS.sessionMax,
+    extraDirs: file.extraDirs ?? DEFAULTS.extraDirs,
+    model: file.model ?? DEFAULTS.model,
   };
 
   cachedConfig = config;

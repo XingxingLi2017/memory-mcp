@@ -95,7 +95,6 @@ function buildProfile(target: "copilot" | "claude"): TargetProfile {
       workspaceDir: claudeDir,
       mcpConfigPath: path.join(home, ".claude.json"),
       instructionsPath: path.join(claudeDir, "CLAUDE.md"),
-      serverEnv: { MEMORY_WORKSPACE: claudeDir },
     };
   }
   const copilotDir = path.join(home, ".copilot");
@@ -395,6 +394,17 @@ The MCP server itself is started automatically by the host CLI.`);
 
   // --- setup ---
   console.log(`Setting up memory-mcp for ${profile.name}...\n`);
+
+  // For non-default workspace (e.g. --claude), persist workspace in config file
+  if (profile.workspaceDir !== DEFAULTS.workspace) {
+    const existing = readConfigFile();
+    if (existing.workspace !== profile.workspaceDir) {
+      existing.workspace = profile.workspaceDir;
+      saveConfigFile(existing);
+      resetConfigCache();
+      console.log(`✓ Workspace set to ${profile.workspaceDir} in ${configFilePath()}`);
+    }
+  }
 
   const mcpResult = setupMcpConfig(profile);
   console.log(mcpResult.changed ? `✓ ${mcpResult.message}` : `  ${mcpResult.message}`);
