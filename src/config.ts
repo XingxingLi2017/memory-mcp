@@ -2,7 +2,7 @@
  * Centralized configuration for memory-mcp.
  *
  * Priority: config file (~/memory-mcp.json) > built-in defaults.
- * No environment variables — all settings go through the config file.
+ * Copilot CLI and Claude Code share the same config and database.
  */
 
 import fs from "node:fs";
@@ -12,6 +12,12 @@ import path from "node:path";
 // Types
 // ---------------------------------------------------------------------------
 
+export type SessionDirConfig = {
+  dir: string;
+  /** 'copilot' scans {dir}/{uuid}/events.jsonl, 'claude' scans {dir}/{project}/*.jsonl */
+  kind: "copilot" | "claude";
+};
+
 export interface MemoryConfig {
   workspace: string;
   dbPath: string;
@@ -19,6 +25,7 @@ export interface MemoryConfig {
   tokenMax: number;
   sessionDays: number;
   sessionMax: number;
+  sessionDirs: SessionDirConfig[];
   extraDirs: string[];
   model: string;
 }
@@ -32,15 +39,23 @@ export type MemoryConfigFile = Partial<MemoryConfig>;
 
 const HOME = process.env.HOME ?? process.env.USERPROFILE ?? "~";
 
+export const DEFAULT_WORKDIR = path.join(HOME, ".memory-mcp-workdir");
+
 export const DEFAULT_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
 
+export const DEFAULT_SESSION_DIRS: readonly SessionDirConfig[] = [
+  { dir: path.join(HOME, ".copilot", "session-state"), kind: "copilot" },
+  { dir: path.join(HOME, ".claude", "projects"), kind: "claude" },
+];
+
 export const DEFAULTS: Readonly<MemoryConfig> = {
-  workspace: path.join(HOME, ".copilot"),
+  workspace: DEFAULT_WORKDIR,
   dbPath: "", // derived from workspace if empty
   chunkSize: 512,
   tokenMax: 4096,
   sessionDays: 30,
   sessionMax: -1,
+  sessionDirs: DEFAULT_SESSION_DIRS as SessionDirConfig[],
   extraDirs: [],
   model: DEFAULT_MODEL,
 };
@@ -51,9 +66,9 @@ export const CONFIG_FILENAME = "memory-mcp.json";
 // Config file I/O
 // ---------------------------------------------------------------------------
 
-/** Return the config file path (always ~/memory-mcp.json, cross-platform). */
+/** Return the config file path (inside the workdir: ~/.memory-mcp-workdir/memory-mcp.json). */
 export function configFilePath(): string {
-  return path.join(HOME, CONFIG_FILENAME);
+  return path.join(DEFAULT_WORKDIR, CONFIG_FILENAME);
 }
 
 /** Read the config file. Returns {} if missing or invalid. */
@@ -100,27 +115,31 @@ let cachedConfig: MemoryConfig | null = null;
 
 /**
  * Load and merge configuration.
- * Priority: config file > defaults.
- * The result is cached for the process lifetime.
+ * Priority: overrides > config file > defaults.
+ * The result is cached for the process lifetime (only when no overrides are given).
  */
-export function loadConfig(): MemoryConfig {
-  if (cachedConfig) return cachedConfig;
+export function loadConfig(overrides?: MemoryConfigFile, configPath?: string): MemoryConfig {
+  if (!overrides && !configPath && cachedConfig) return cachedConfig;
 
-  const file = readConfigFile();
-  const workspace = file.workspace ?? DEFAULTS.workspace;
+  const file = readConfigFile(configPath);
+  const workspace = overrides?.workspace ?? file.workspace ?? DEFAULTS.workspace;
 
   const config: MemoryConfig = {
     workspace,
-    dbPath: file.dbPath ?? path.join(workspace, "memory.db"),
-    chunkSize: file.chunkSize ?? DEFAULTS.chunkSize,
-    tokenMax: file.tokenMax ?? DEFAULTS.tokenMax,
-    sessionDays: file.sessionDays ?? DEFAULTS.sessionDays,
-    sessionMax: file.sessionMax ?? DEFAULTS.sessionMax,
-    extraDirs: file.extraDirs ?? DEFAULTS.extraDirs,
-    model: file.model ?? DEFAULTS.model,
+    dbPath: overrides?.dbPath ?? file.dbPath ?? path.join(workspace, "memory.db"),
+    chunkSize: overrides?.chunkSize ?? file.chunkSize ?? DEFAULTS.chunkSize,
+    tokenMax: overrides?.tokenMax ?? file.tokenMax ?? DEFAULTS.tokenMax,
+    sessionDays: overrides?.sessionDays ?? file.sessionDays ?? DEFAULTS.sessionDays,
+    sessionMax: overrides?.sessionMax ?? file.sessionMax ?? DEFAULTS.sessionMax,
+    sessionDirs: overrides?.sessionDirs ?? file.sessionDirs ?? DEFAULTS.sessionDirs,
+    extraDirs: overrides?.extraDirs ?? file.extraDirs ?? DEFAULTS.extraDirs,
+    model: overrides?.model ?? file.model ?? DEFAULTS.model,
   };
 
-  cachedConfig = config;
+  // Only cache when using default config (no overrides)
+  if (!overrides && !configPath) {
+    cachedConfig = config;
+  }
   return config;
 }
 

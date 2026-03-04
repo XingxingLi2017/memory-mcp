@@ -88,11 +88,12 @@ function getHomeDir(): string {
 
 function buildProfile(target: "copilot" | "claude"): TargetProfile {
   const home = getHomeDir();
+  const workspaceDir = DEFAULTS.workspace; // shared: ~/.memory-mcp-workdir
   if (target === "claude") {
     const claudeDir = path.join(home, ".claude");
     return {
       name: "Claude Code",
-      workspaceDir: claudeDir,
+      workspaceDir,
       mcpConfigPath: path.join(home, ".claude.json"),
       instructionsPath: path.join(claudeDir, "CLAUDE.md"),
     };
@@ -100,7 +101,7 @@ function buildProfile(target: "copilot" | "claude"): TargetProfile {
   const copilotDir = path.join(home, ".copilot");
   return {
     name: "Copilot CLI",
-    workspaceDir: copilotDir,
+    workspaceDir,
     mcpConfigPath: path.join(copilotDir, "mcp-config.json"),
     instructionsPath: path.join(copilotDir, "copilot-instructions.md"),
   };
@@ -264,12 +265,104 @@ function uninstall(profile: TargetProfile): void {
 }
 
 // ---------------------------------------------------------------------------
+// Migration from legacy directories (~/.copilot, ~/.claude)
+// ---------------------------------------------------------------------------
+
+/** Top-level memory files to look for in legacy dirs. */
+const MEMORY_ROOT_FILES = ["MEMORY.md", "memory.md", "MEMORY.txt", "memory.txt"];
+
+/**
+ * Copy a file if it doesn't already exist at the destination.
+ * Returns true if copied.
+ */
+function copyIfMissing(src: string, dest: string): boolean {
+  if (fs.existsSync(dest)) return false;
+  const dir = path.dirname(dest);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(src, dest);
+  return true;
+}
+
+/**
+ * Recursively copy directory contents, skipping files that already exist.
+ * Returns number of files copied.
+ */
+function copyDirMerge(srcDir: string, destDir: string): number {
+  if (!fs.existsSync(srcDir)) return 0;
+  let count = 0;
+  const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(srcDir, entry.name);
+    const destPath = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      count += copyDirMerge(srcPath, destPath);
+    } else if (entry.isFile()) {
+      if (copyIfMissing(srcPath, destPath)) count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Migrate memory files from legacy directories to the new workdir.
+ * Only runs if the new workdir has no MEMORY.md and no memory/ directory.
+ */
+function migrateFromLegacyDirs(workspaceDir: string): void {
+  // Skip if workspace already has content
+  const hasMemoryFile = MEMORY_ROOT_FILES.some((f) => fs.existsSync(path.join(workspaceDir, f)));
+  const hasMemoryDir = fs.existsSync(path.join(workspaceDir, "memory"));
+  if (hasMemoryFile || hasMemoryDir) return;
+
+  const home = getHomeDir();
+  const legacyDirs = [
+    path.join(home, ".copilot"),
+    path.join(home, ".claude"),
+  ];
+
+  let migrated = false;
+
+  for (const legacyDir of legacyDirs) {
+    if (!fs.existsSync(legacyDir)) continue;
+    const label = path.basename(legacyDir);
+
+    // Copy root memory files
+    for (const file of MEMORY_ROOT_FILES) {
+      const src = path.join(legacyDir, file);
+      if (fs.existsSync(src) && copyIfMissing(src, path.join(workspaceDir, file))) {
+        if (!migrated) {
+          console.log(`Migrating memory files to ${workspaceDir}:`);
+          migrated = true;
+        }
+        console.log(`  ✓ Copied ${file} from ~/${label}/`);
+      }
+    }
+
+    // Copy memory/ directory
+    const srcMemDir = path.join(legacyDir, "memory");
+    if (fs.existsSync(srcMemDir)) {
+      const count = copyDirMerge(srcMemDir, path.join(workspaceDir, "memory"));
+      if (count > 0) {
+        if (!migrated) {
+          console.log(`Migrating memory files to ${workspaceDir}:`);
+          migrated = true;
+        }
+        console.log(`  ✓ Copied memory/ (${count} files) from ~/${label}/`);
+      }
+    }
+  }
+
+  if (migrated) {
+    console.log("  Note: Original files retained. Remove manually when ready.\n");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Config command
 // ---------------------------------------------------------------------------
 
 const CONFIG_KEYS: (keyof MemoryConfig)[] = [
   "workspace", "dbPath", "chunkSize", "tokenMax",
-  "sessionDays", "sessionMax", "extraDirs", "model",
+  "sessionDays", "sessionMax", "sessionDirs", "extraDirs", "model",
 ];
 
 function handleConfig(args: string[]): void {
@@ -322,6 +415,22 @@ function handleConfig(args: string[]): void {
     if (key === "extraDirs") {
       existing.extraDirs = value
         .split(",").map((d) => d.trim()).filter(Boolean).map((d) => path.resolve(d));
+    } else if (key === "sessionDirs") {
+      // JSON input: '[{"dir":"/path","kind":"copilot"}]'
+      try {
+        const parsed = JSON.parse(value);
+        if (!Array.isArray(parsed)) throw new Error("must be an array");
+        for (const item of parsed) {
+          if (!item.dir || !item.kind || !["copilot", "claude"].includes(item.kind)) {
+            throw new Error(`each entry needs {dir, kind: "copilot"|"claude"}`);
+          }
+        }
+        existing.sessionDirs = parsed;
+      } catch (err) {
+        console.error(`sessionDirs must be valid JSON array, e.g. '[{"dir":"/path","kind":"copilot"}]'`);
+        console.error(`Error: ${err instanceof Error ? err.message : err}`);
+        process.exit(1);
+      }
     } else if (key === "chunkSize" || key === "tokenMax" || key === "sessionDays" || key === "sessionMax") {
       const n = Number(value);
       if (!Number.isFinite(n)) {
@@ -395,16 +504,8 @@ The MCP server itself is started automatically by the host CLI.`);
   // --- setup ---
   console.log(`Setting up memory-mcp for ${profile.name}...\n`);
 
-  // For non-default workspace (e.g. --claude), persist workspace in config file
-  if (profile.workspaceDir !== DEFAULTS.workspace) {
-    const existing = readConfigFile();
-    if (existing.workspace !== profile.workspaceDir) {
-      existing.workspace = profile.workspaceDir;
-      saveConfigFile(existing);
-      resetConfigCache();
-      console.log(`✓ Workspace set to ${profile.workspaceDir} in ${configFilePath()}`);
-    }
-  }
+  // Migrate from legacy dirs if this is a fresh workspace
+  migrateFromLegacyDirs(profile.workspaceDir);
 
   const mcpResult = setupMcpConfig(profile);
   console.log(mcpResult.changed ? `✓ ${mcpResult.message}` : `  ${mcpResult.message}`);

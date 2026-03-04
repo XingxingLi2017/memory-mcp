@@ -56,13 +56,12 @@ This compiles with the correct Windows API path and restores full multi-threaded
 
 ## Usage
 
-Memory files live in a dot-directory under your home folder:
-
-- **Copilot CLI**: `~/.copilot/` (default)
-- **Claude Code**: `~/.claude/` (when using `--claude`)
+All memory data lives in a single shared directory, used by both Copilot CLI and Claude Code:
 
 ```
-~/.copilot/  (or ~/.claude/)
+~/.memory-mcp-workdir/
+├── memory-mcp.json        # Configuration file
+├── memory.db              # SQLite database (index + vectors)
 ├── MEMORY.md              # Top-level memory file
 └── memory/
     ├── decisions.md       # Architecture decisions
@@ -117,18 +116,19 @@ memory-mcp config reset
 memory-mcp config path
 ```
 
-Config is stored in `~/memory-mcp.json` (cross-platform: `$HOME` on Linux/macOS, `%USERPROFILE%` on Windows).
+Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$HOME` on Linux/macOS, `%USERPROFILE%` on Windows).
 
 ### Config Keys
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `workspace` | `~/.copilot` | Root directory to scan for memory files |
+| `workspace` | `~/.memory-mcp-workdir` | Root directory for memory files and database |
 | `dbPath` | `<workspace>/memory.db` | Path to SQLite database |
 | `chunkSize` | `512` | Chunk size in tokens for markdown splitting (64–4096). Changing triggers automatic index rebuild |
 | `tokenMax` | `4096` | Default max tokens per search response (100–16384). Controls snippet length and result count |
 | `sessionDays` | `30` | Only index session transcripts from the last N days (0 = index all) |
 | `sessionMax` | `-1` | Max number of sessions to index, newest first (-1 = no limit, 0 = disable session indexing) |
+| `sessionDirs` | `[copilot, claude]` | Session transcript sources. Default: `~/.copilot/session-state` (copilot) + `~/.claude/projects` (claude). Set to override entirely. JSON format: `[{"dir":"/path","kind":"copilot"}]` |
 | `extraDirs` | `[]` | Extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
 | `model` | `hf:ggml-org/embeddinggemma-300M-GGUF/...` | Embedding model. Accepts a HuggingFace URI (`hf:org/repo/file.gguf`) for auto-download, or a local file path (`/path/to/model.gguf`) |
 

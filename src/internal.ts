@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { SessionDirConfig } from "./config.js";
 
 /**
  * Build unique aliases for extra directories.
@@ -574,18 +575,14 @@ export function chunkMarkdown(
 
 export type SessionFileEntry = MemoryFileEntry;
 
-type SessionSource = {
-  dir: string;
-  /** 'copilot' scans {dir}/{uuid}/events.jsonl, 'claude' scans {dir}/{project}/*.jsonl */
-  kind: "copilot" | "claude";
-};
+type SessionSource = SessionDirConfig;
 
 /**
  * Resolve session directories for supported host CLIs.
  * Copilot CLI: ~/.copilot/session-state/{uuid}/events.jsonl
  * Claude Code: ~/.claude/projects/{project}/*.jsonl
  */
-function resolveSessionSources(): SessionSource[] {
+function defaultSessionSources(): SessionSource[] {
   const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
   if (!home) return [];
   return [
@@ -598,9 +595,10 @@ function resolveSessionSources(): SessionSource[] {
  * Discover session JSONL files from all supported CLIs,
  * filtered by maxDays and maxCount.
  * maxCount=0 disables session indexing. maxCount=-1 means no count limit.
+ * If sessionDirs is provided, it overrides the default sources entirely.
  */
 export async function listSessionFiles(
-  opts?: { maxDays?: number; maxCount?: number },
+  opts?: { maxDays?: number; maxCount?: number; sessionDirs?: SessionDirConfig[] },
 ): Promise<string[]> {
   const maxCount = opts?.maxCount ?? -1;
   if (maxCount === 0) return [];
@@ -609,7 +607,7 @@ export async function listSessionFiles(
   const cutoff = maxDays > 0 ? Date.now() - maxDays * 24 * 60 * 60 * 1000 : 0;
 
   const candidates: Array<{ path: string; mtimeMs: number }> = [];
-  for (const src of resolveSessionSources()) {
+  for (const src of (opts?.sessionDirs ?? defaultSessionSources())) {
     try {
       const entries = await fs.readdir(src.dir, { withFileTypes: true });
       for (const entry of entries) {

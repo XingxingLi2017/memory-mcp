@@ -44,6 +44,7 @@ async function ensureSynced(): Promise<void> {
         chunkSize: config.chunkSize,
         maxDays: config.sessionDays,
         maxCount: config.sessionMax,
+        sessionDirs: config.sessionDirs,
       });
       lastSessionSyncAt = Date.now();
     }
