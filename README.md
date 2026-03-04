@@ -97,6 +97,28 @@ The host CLI will automatically search these files before answering questions ab
 8. Access-count boost gently promotes frequently retrieved chunks
 9. Falls back to LIKE search if FTS5 is unavailable
 
+## Configuration
+
+All settings have sensible defaults and work out of the box. To customize, use the config command:
+
+```bash
+# Show current config (merged: env var > config file > defaults)
+memory-mcp config
+
+# Set a value
+memory-mcp config set chunkSize 1024
+memory-mcp config set extraDirs /data/obsidian-vault,/data/notes
+memory-mcp config set model /path/to/local-model.gguf
+
+# Reset to defaults
+memory-mcp config reset
+
+# Show config file path
+memory-mcp config path
+```
+
+Config is stored in `~/.copilot/memory-mcp.json`. Environment variables override config file values.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -109,6 +131,8 @@ The host CLI will automatically search these files before answering questions ab
 | `MEMORY_SESSION_DAYS` | `30` | Only index session transcripts from the last N days (0 = index all) |
 | `MEMORY_SESSION_MAX` | `-1` | Max number of sessions to index, newest first (-1 = no limit, 0 = disable session indexing) |
 | `MEMORY_EXTRA_DIRS` | _(none)_ | Comma-separated extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
+
+**Priority**: environment variable > config file (`~/.copilot/memory-mcp.json`) > built-in defaults.
 
 ## CLI
 

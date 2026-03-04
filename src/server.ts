@@ -9,69 +9,16 @@ import { openDatabase } from "./db.js";
 import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
 import { MEMORY_EXTENSIONS, hashText, buildExtraDirAliases } from "./internal.js";
+import { loadConfig, resolvedExtraDirs } from "./config.js";
 
-const DEFAULT_WORKSPACE = path.join(
-  process.env.HOME ?? process.env.USERPROFILE ?? "~",
-  ".copilot",
-);
-
-function resolveWorkspaceDir(): string {
-  return process.env.MEMORY_WORKSPACE ?? DEFAULT_WORKSPACE;
-}
-
-function resolveDbPath(): string {
-  return process.env.MEMORY_DB_PATH ?? path.join(resolveWorkspaceDir(), "memory.db");
-}
-
-function resolveChunkSize(): number {
-  const val = process.env.MEMORY_CHUNK_SIZE;
-  if (val) {
-    const n = Number(val);
-    if (n >= 64 && n <= 4096) return n;
-  }
-  return 512;
-}
-
-function resolveTokenMax(): number {
-  const val = process.env.MEMORY_TOKEN_MAX;
-  if (val) {
-    const n = Number(val);
-    if (n >= 100 && n <= 16384) return n;
-  }
-  return 4096;
-}
-
-function resolveSessionDays(): number {
-  const val = process.env.MEMORY_SESSION_DAYS;
-  if (val) {
-    const n = Number(val);
-    if (Number.isFinite(n) && n >= 0) return n;
-  }
-  return 30;
-}
-
-function resolveSessionMax(): number {
-  const val = process.env.MEMORY_SESSION_MAX;
-  if (val) {
-    const n = Number(val);
-    if (Number.isFinite(n) && n >= -1) return n;
-  }
-  return -1; // no count limit
-}
-
-function resolveExtraDirs(): string[] | undefined {
-  const val = process.env.MEMORY_EXTRA_DIRS;
-  if (!val) return undefined;
-  const dirs = val.split(",").map((d) => d.trim()).filter(Boolean).map((d) => path.resolve(d));
-  return dirs.length > 0 ? dirs : undefined;
-}
+const config = loadConfig();
 
 const server = new McpServer({
   name: "memory",
   version: "0.1.0",
 });
 
-const dbPath = resolveDbPath();
+const dbPath = config.dbPath;
 let db: import("better-sqlite3").Database;
 let lastSyncAt = 0;
 let lastSessionSyncAt = 0;
@@ -86,17 +33,17 @@ async function ensureSynced(): Promise<void> {
   const memoryDue = now - lastSyncAt >= SYNC_COOLDOWN_MS;
   const sessionDue = now - lastSessionSyncAt >= SESSION_SYNC_COOLDOWN_MS;
   if (!memoryDue && !sessionDue) return;
-  const workspaceDir = resolveWorkspaceDir();
+  const workspaceDir = config.workspace;
   try {
     if (memoryDue) {
-      await syncMemoryFiles(db, workspaceDir, { chunkSize: resolveChunkSize(), extraDirs: resolveExtraDirs() });
+      await syncMemoryFiles(db, workspaceDir, { chunkSize: config.chunkSize, extraDirs: resolvedExtraDirs(config) });
       lastSyncAt = Date.now();
     }
     if (sessionDue) {
       await syncSessionFiles(db, {
-        chunkSize: resolveChunkSize(),
-        maxDays: resolveSessionDays(),
-        maxCount: resolveSessionMax(),
+        chunkSize: config.chunkSize,
+        maxDays: config.sessionDays,
+        maxCount: config.sessionMax,
       });
       lastSessionSyncAt = Date.now();
     }
@@ -125,7 +72,7 @@ server.tool(
   },
   async ({ query, maxResults, minScore, tokenMax, after, before }) => {
     await ensureSynced();
-    const effectiveTokenMax = tokenMax ?? resolveTokenMax();
+    const effectiveTokenMax = tokenMax ?? config.tokenMax;
     const results = await searchMemory(db, query, { maxResults, minScore, tokenMax: effectiveTokenMax, after, before });
     return {
       content: [
@@ -147,8 +94,8 @@ server.tool(
     lines: z.number().optional().describe("Number of lines to read (omit to read entire file)"),
   },
   async ({ path: relPath, from, lines }) => {
-    const workspaceDir = resolveWorkspaceDir();
-    const extraDirs = resolveExtraDirs();
+    const workspaceDir = config.workspace;
+    const extraDirs = resolvedExtraDirs(config);
 
     // Resolve extra: prefix paths using alias → directory mapping
     let absPath: string;
@@ -251,7 +198,7 @@ server.tool(
   {},
   async () => {
     await ensureSynced();
-    const workspaceDir = resolveWorkspaceDir();
+    const workspaceDir = config.workspace;
     const fileCount = (db.prepare(`SELECT COUNT(*) as c FROM files`).get() as { c: number }).c;
     const memoryFileCount = (db.prepare(`SELECT COUNT(*) as c FROM files WHERE source = 'memory'`).get() as { c: number }).c;
     const sessionFileCount = (db.prepare(`SELECT COUNT(*) as c FROM files WHERE source = 'sessions'`).get() as { c: number }).c;
@@ -304,10 +251,10 @@ server.tool(
       embeddedChunks: vecCount,
       embeddingCache: cacheCount,
       config: {
-        chunkSize: resolveChunkSize(),
-        tokenMax: resolveTokenMax(),
-        sessionDays: resolveSessionDays(),
-        sessionMax: resolveSessionMax(),
+        chunkSize: config.chunkSize,
+        tokenMax: config.tokenMax,
+        sessionDays: config.sessionDays,
+        sessionMax: config.sessionMax,
       },
       lastSyncAt: lastSyncAt ? new Date(lastSyncAt).toISOString() : null,
       warnings: warnings.length > 0 ? warnings : undefined,
@@ -341,7 +288,7 @@ server.tool(
       .describe("The raw context supporting this fact — conversation excerpt, code snippet, or observation. Auto-chunked and linked for traceability."),
   },
   async ({ content, category, source, evidence }) => {
-    const workspaceDir = resolveWorkspaceDir();
+    const workspaceDir = config.workspace;
     const memoryDir = path.join(workspaceDir, "memory");
 
     if (!fs.existsSync(memoryDir)) {
@@ -540,7 +487,7 @@ async function findMemoryEntry(
   query: string,
   category?: string,
 ): Promise<{ filePath: string; lineIndex: number; line: string } | null> {
-  const workspaceDir = resolveWorkspaceDir();
+  const workspaceDir = config.workspace;
   const normalized = normalizeForMatch(query);
   if (!normalized) return null;
 
@@ -584,13 +531,13 @@ const REF_RE = /\[ref:(memory\/evidence\/[^\]]+)\]/;
 function cleanupEvidence(line: string): void {
   const m = line.match(REF_RE);
   if (!m) return;
-  const absPath = path.join(resolveWorkspaceDir(), m[1]!);
+  const absPath = path.join(config.workspace, m[1]!);
   try { fs.unlinkSync(absPath); } catch {}
 }
 
 /** Write an evidence file and return its path + ref tag. */
 function writeEvidence(fact: string, evidence: string): { path: string; refTag: string } {
-  const memoryDir = path.join(resolveWorkspaceDir(), "memory");
+  const memoryDir = path.join(config.workspace, "memory");
   const evidenceDir = path.join(memoryDir, "evidence");
   if (!fs.existsSync(evidenceDir)) {
     fs.mkdirSync(evidenceDir, { recursive: true });
@@ -631,7 +578,7 @@ server.tool(
     // Clean up orphan evidence file
     cleanupEvidence(match.line);
 
-    const relPath = path.relative(resolveWorkspaceDir(), match.filePath).replace(/\\/g, "/");
+    const relPath = path.relative(config.workspace, match.filePath).replace(/\\/g, "/");
     return {
       content: [{
         type: "text" as const,
@@ -692,7 +639,7 @@ server.tool(
     fs.writeFileSync(match.filePath, lines.join("\n"), "utf-8");
     lastSyncAt = 0;
 
-    const relPath = path.relative(resolveWorkspaceDir(), match.filePath).replace(/\\/g, "/");
+    const relPath = path.relative(config.workspace, match.filePath).replace(/\\/g, "/");
     const result: Record<string, unknown> = { updated: true, path: relPath, old: match.line, new: newEntry };
     if (evidencePath) result.evidencePath = evidencePath;
     return {
@@ -707,7 +654,7 @@ server.tool(
 // --- Start ---
 
 async function main() {
-  db = await openDatabase(dbPath, { chunkSize: resolveChunkSize() });
+  db = await openDatabase(dbPath, { chunkSize: config.chunkSize });
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // Initial sync on startup

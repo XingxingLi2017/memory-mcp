@@ -6,42 +6,13 @@
  * Outputs JSON to stdout for integration with OpenClaw exec.
  */
 
-import path from "node:path";
 import { openDatabase } from "./db.js";
 import { syncMemoryFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
-
-const DEFAULT_WORKSPACE = path.join(
-  process.env.HOME ?? process.env.USERPROFILE ?? "~",
-  ".copilot",
-);
-
-function resolveWorkspaceDir(): string {
-  return process.env.MEMORY_WORKSPACE ?? DEFAULT_WORKSPACE;
-}
-
-function resolveDbPath(): string {
-  return process.env.MEMORY_DB_PATH ?? path.join(resolveWorkspaceDir(), "memory.db");
-}
-
-function resolveChunkSize(): number {
-  const val = process.env.MEMORY_CHUNK_SIZE;
-  if (val) {
-    const n = Number(val);
-    if (n >= 64 && n <= 4096) return n;
-  }
-  return 512;
-}
-
-function resolveExtraDirs(): string[] | undefined {
-  const val = process.env.MEMORY_EXTRA_DIRS;
-  if (!val) return undefined;
-  const dirs = val.split(",").map((d) => d.trim()).filter(Boolean).map((d) => path.resolve(d));
-  return dirs.length > 0 ? dirs : undefined;
-}
+import { loadConfig, resolvedExtraDirs } from "./config.js";
 
 function printUsage(): void {
-  console.error(`Usage: memory-mcp <command> [options]
+  console.error(`Usage: memory-mcp-cli <command> [options]
 
 Commands:
   search <query>    Search memory files
@@ -51,12 +22,14 @@ Commands:
 
   status            Show index status
 
-Environment:
-  MEMORY_WORKSPACE    Root directory (default: ~/.copilot)
-  MEMORY_DB_PATH      SQLite database path
-  MEMORY_EXTRA_DIRS   Comma-separated extra directories to index
-  MEMORY_MCP_MODEL    Embedding model (HF URI or local path)
-  MEMORY_CHUNK_SIZE   Chunk size in tokens (default: 512)`);
+Configuration:
+  Settings are read from ~/.copilot/memory-mcp.json (editable via "memory-mcp config set").
+  Environment variables override config file values:
+    MEMORY_WORKSPACE    Root directory (default: ~/.copilot)
+    MEMORY_DB_PATH      SQLite database path
+    MEMORY_EXTRA_DIRS   Comma-separated extra directories to index
+    MEMORY_MCP_MODEL    Embedding model (HF URI or local path)
+    MEMORY_CHUNK_SIZE   Chunk size in tokens (default: 512)`);
 }
 
 function parseArgs(args: string[]): { command: string; query?: string; opts: Record<string, string> } {
@@ -105,14 +78,15 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const workspaceDir = resolveWorkspaceDir();
-  const dbPath = resolveDbPath();
-  const db = await openDatabase(dbPath, { chunkSize: resolveChunkSize() });
+  const config = loadConfig();
+  const workspaceDir = config.workspace;
+  const dbPath = config.dbPath;
+  const db = await openDatabase(dbPath, { chunkSize: config.chunkSize });
 
   try {
     // Sync before search
-    const extraDirs = resolveExtraDirs();
-    await syncMemoryFiles(db, workspaceDir, { chunkSize: resolveChunkSize(), extraDirs });
+    const extraDirs = resolvedExtraDirs(config);
+    await syncMemoryFiles(db, workspaceDir, { chunkSize: config.chunkSize, extraDirs });
     // Best-effort embedding sync
     try { await syncEmbeddings(db); } catch {}
 

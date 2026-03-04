@@ -3,6 +3,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  loadConfig, readConfigFile, saveConfigFile, deleteConfigFile,
+  configFilePath, DEFAULTS, resetConfigCache,
+  type MemoryConfig, type MemoryConfigFile,
+} from "./config.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -260,6 +265,89 @@ function uninstall(profile: TargetProfile): void {
 }
 
 // ---------------------------------------------------------------------------
+// Config command
+// ---------------------------------------------------------------------------
+
+const CONFIG_KEYS: (keyof MemoryConfig)[] = [
+  "workspace", "dbPath", "chunkSize", "tokenMax",
+  "sessionDays", "sessionMax", "extraDirs", "model",
+];
+
+function handleConfig(args: string[]): void {
+  const sub = args[0];
+
+  if (!sub || sub === "show") {
+    // Show merged config
+    const merged = loadConfig();
+    const filePath = configFilePath(merged.workspace);
+    console.log(`Config file: ${filePath}\n`);
+    console.log(JSON.stringify(merged, null, 2));
+    return;
+  }
+
+  if (sub === "path") {
+    console.log(configFilePath());
+    return;
+  }
+
+  if (sub === "reset") {
+    const filePath = configFilePath();
+    if (deleteConfigFile(filePath)) {
+      console.log(`✓ Config file deleted: ${filePath}`);
+      console.log("  All settings reset to defaults.");
+    } else {
+      console.log("  No config file found — already using defaults.");
+    }
+    return;
+  }
+
+  if (sub === "set") {
+    const key = args[1] as keyof MemoryConfig | undefined;
+    const value = args[2];
+    if (!key || value === undefined) {
+      console.error("Usage: memory-mcp config set <key> <value>");
+      console.error(`Valid keys: ${CONFIG_KEYS.join(", ")}`);
+      process.exit(1);
+    }
+    if (!CONFIG_KEYS.includes(key)) {
+      console.error(`Unknown config key: ${key}`);
+      console.error(`Valid keys: ${CONFIG_KEYS.join(", ")}`);
+      process.exit(1);
+    }
+
+    // Read existing file config (not merged)
+    const filePath = configFilePath();
+    const existing = readConfigFile(filePath);
+
+    // Parse and validate value
+    if (key === "extraDirs") {
+      existing.extraDirs = value
+        .split(",").map((d) => d.trim()).filter(Boolean).map((d) => path.resolve(d));
+    } else if (key === "chunkSize" || key === "tokenMax" || key === "sessionDays" || key === "sessionMax") {
+      const n = Number(value);
+      if (!Number.isFinite(n)) {
+        console.error(`${key} must be a number, got "${value}"`);
+        process.exit(1);
+      }
+      existing[key] = n;
+    } else {
+      // string fields: workspace, dbPath, model
+      (existing as Record<string, unknown>)[key] = value;
+    }
+
+    saveConfigFile(existing, filePath);
+    resetConfigCache();
+    console.log(`✓ ${key} = ${JSON.stringify(existing[key])}`);
+    console.log(`  Saved to ${filePath}`);
+    return;
+  }
+
+  console.error(`Unknown config subcommand: ${sub}`);
+  console.error("Usage: memory-mcp config [show|set|reset|path]");
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -268,19 +356,28 @@ function main() {
   const command = args[0];
   const flags = new Set(args.slice(1));
 
-  const validCommands = ["setup", "uninstall"];
+  const validCommands = ["setup", "uninstall", "config"];
   if (!command || !validCommands.includes(command)) {
     console.log(`memory-mcp — Local memory management for AI coding assistants
 
 Usage:
   memory-mcp setup [--claude]       Configure MCP server for Copilot CLI (or Claude Code)
   memory-mcp uninstall [--claude]   Remove memory MCP configuration
+  memory-mcp config [show]          Show current merged configuration
+  memory-mcp config set <key> <val> Set a config value
+  memory-mcp config reset           Reset config to defaults
+  memory-mcp config path            Show config file path
 
 Options:
   --claude    Target Claude Code CLI instead of GitHub Copilot CLI
 
 The MCP server itself is started automatically by the host CLI.`);
     process.exit(0);
+  }
+
+  if (command === "config") {
+    handleConfig(args.slice(1));
+    return;
   }
 
   const target = flags.has("--claude") ? "claude" : "copilot";
