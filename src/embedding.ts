@@ -1,16 +1,22 @@
 /**
  * Local embedding provider using node-llama-cpp.
- * Model is configurable via MEMORY_MCP_MODEL env var (HF URI or local path).
+ * Model is configurable via config file (~/.memory-mcp-workdir/memory-mcp.json).
  * Defaults to embeddinggemma-300M. Lazy-loaded on first embedding request.
  * Gracefully unavailable if node-llama-cpp is not installed.
  */
 
-const DEFAULT_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
-const ENV_MODEL = process.env.MEMORY_MCP_MODEL || undefined;
+import { loadConfig, DEFAULT_MODEL } from "./config.js";
 
 /** Check if spec is a HF URI (only hf: scheme supported by node-llama-cpp resolveModelFile). */
 function isHfUri(s: string): boolean {
   return s.startsWith("hf:");
+}
+
+/** Cached model spec — read from config once on first use. */
+let cachedModelSpec: string | null = null;
+function resolveModelSpec(): string {
+  if (!cachedModelSpec) cachedModelSpec = loadConfig().model;
+  return cachedModelSpec;
 }
 
 // Lazy-init state
@@ -41,7 +47,7 @@ async function ensureContext(): Promise<EmbeddingContext> {
     llamaInstance = await nodeLlamaCpp.getLlama({ logLevel: nodeLlamaCpp.LlamaLogLevel.error });
   }
   if (!embeddingModel) {
-    const spec = ENV_MODEL ?? DEFAULT_MODEL;
+    const spec = resolveModelSpec();
     let modelPath: string;
     if (isHfUri(spec)) {
       modelPath = await nodeLlamaCpp.resolveModelFile(spec);
@@ -110,7 +116,7 @@ export async function isEmbeddingAvailable(): Promise<boolean> {
   if (unavailable) return false;
   if (embeddingAvailableCache !== null) return embeddingAvailableCache;
   try {
-    const spec = ENV_MODEL ?? DEFAULT_MODEL;
+    const spec = resolveModelSpec();
     if (isHfUri(spec)) {
       const { resolveModelFile } = await import("node-llama-cpp");
       await resolveModelFile(spec);

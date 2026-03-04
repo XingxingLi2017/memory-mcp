@@ -3,6 +3,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  loadConfig, readConfigFile, saveConfigFile, deleteConfigFile,
+  configFilePath, DEFAULTS, migrateFromLegacyDirs,
+  type MemoryConfig, type MemoryConfigFile,
+} from "./config.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -83,20 +88,20 @@ function getHomeDir(): string {
 
 function buildProfile(target: "copilot" | "claude"): TargetProfile {
   const home = getHomeDir();
+  const workspaceDir = DEFAULTS.workspace; // shared: ~/.memory-mcp-workdir
   if (target === "claude") {
     const claudeDir = path.join(home, ".claude");
     return {
       name: "Claude Code",
-      workspaceDir: claudeDir,
+      workspaceDir,
       mcpConfigPath: path.join(home, ".claude.json"),
       instructionsPath: path.join(claudeDir, "CLAUDE.md"),
-      serverEnv: { MEMORY_WORKSPACE: claudeDir },
     };
   }
   const copilotDir = path.join(home, ".copilot");
   return {
     name: "Copilot CLI",
-    workspaceDir: copilotDir,
+    workspaceDir,
     mcpConfigPath: path.join(copilotDir, "mcp-config.json"),
     instructionsPath: path.join(copilotDir, "copilot-instructions.md"),
   };
@@ -260,6 +265,116 @@ function uninstall(profile: TargetProfile): void {
 }
 
 // ---------------------------------------------------------------------------
+// Config command
+// ---------------------------------------------------------------------------
+
+const CONFIG_KEYS: (keyof MemoryConfig)[] = [
+  "workspace", "dbPath", "chunkSize", "tokenMax",
+  "sessionDays", "sessionMax", "sessionDirs", "extraDirs", "model",
+];
+
+function handleConfig(args: string[]): void {
+  const sub = args[0];
+
+  if (!sub || sub === "show") {
+    // Show merged config
+    const merged = loadConfig();
+    const filePath = configFilePath();
+    console.log(`Config file: ${filePath}\n`);
+    console.log(JSON.stringify(merged, null, 2));
+    return;
+  }
+
+  if (sub === "path") {
+    console.log(configFilePath());
+    return;
+  }
+
+  if (sub === "reset") {
+    const filePath = configFilePath();
+    if (deleteConfigFile(filePath)) {
+      console.log(`✓ Config file deleted: ${filePath}`);
+      console.log("  All settings reset to defaults.");
+    } else {
+      console.log("  No config file found — already using defaults.");
+    }
+    return;
+  }
+
+  if (sub === "set") {
+    const key = args[1] as keyof MemoryConfig | undefined;
+    const value = args[2];
+    if (!key || value === undefined) {
+      console.error("Usage: memory-mcp config set <key> <value>");
+      console.error(`Valid keys: ${CONFIG_KEYS.join(", ")}`);
+      process.exit(1);
+    }
+    if (!CONFIG_KEYS.includes(key)) {
+      console.error(`Unknown config key: ${key}`);
+      console.error(`Valid keys: ${CONFIG_KEYS.join(", ")}`);
+      process.exit(1);
+    }
+
+    // Read existing file config (not merged)
+    const filePath = configFilePath();
+    const existing = readConfigFile(filePath);
+
+    // Parse and validate value
+    if (key === "extraDirs") {
+      existing.extraDirs = value
+        .split(",").map((d) => d.trim()).filter(Boolean).map((d) => path.resolve(d));
+    } else if (key === "sessionDirs") {
+      // JSON input: '[{"dir":"/path","kind":"copilot"}]'
+      try {
+        const parsed = JSON.parse(value);
+        if (!Array.isArray(parsed)) throw new Error("must be an array");
+        for (const item of parsed) {
+          if (!item.dir || !item.kind || !["copilot", "claude"].includes(item.kind)) {
+            throw new Error(`each entry needs {dir, kind: "copilot"|"claude"}`);
+          }
+        }
+        existing.sessionDirs = parsed;
+      } catch (err) {
+        console.error(`sessionDirs must be valid JSON array, e.g. '[{"dir":"/path","kind":"copilot"}]'`);
+        console.error(`Error: ${err instanceof Error ? err.message : err}`);
+        process.exit(1);
+      }
+    } else if (key === "chunkSize" || key === "tokenMax" || key === "sessionDays" || key === "sessionMax") {
+      const n = Number(value);
+      if (!Number.isFinite(n)) {
+        console.error(`${key} must be a number, got "${value}"`);
+        process.exit(1);
+      }
+      // Range validation
+      const ranges: Record<string, [number, number]> = {
+        chunkSize: [64, 4096],
+        tokenMax: [100, 16384],
+        sessionDays: [0, Infinity],
+        sessionMax: [-1, Infinity],
+      };
+      const [min, max] = ranges[key]!;
+      if (n < min || n > max) {
+        console.error(`${key} must be between ${min} and ${max === Infinity ? "∞" : max}, got ${n}`);
+        process.exit(1);
+      }
+      existing[key] = n;
+    } else {
+      // string fields: workspace, dbPath, model
+      (existing as Record<string, unknown>)[key] = value;
+    }
+
+    saveConfigFile(existing, filePath);
+    console.log(`✓ ${key} = ${JSON.stringify(existing[key])}`);
+    console.log(`  Saved to ${filePath}`);
+    return;
+  }
+
+  console.error(`Unknown config subcommand: ${sub}`);
+  console.error("Usage: memory-mcp config [show|set|reset|path]");
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -268,19 +383,28 @@ function main() {
   const command = args[0];
   const flags = new Set(args.slice(1));
 
-  const validCommands = ["setup", "uninstall"];
+  const validCommands = ["setup", "uninstall", "config"];
   if (!command || !validCommands.includes(command)) {
     console.log(`memory-mcp — Local memory management for AI coding assistants
 
 Usage:
   memory-mcp setup [--claude]       Configure MCP server for Copilot CLI (or Claude Code)
   memory-mcp uninstall [--claude]   Remove memory MCP configuration
+  memory-mcp config [show]          Show current merged configuration
+  memory-mcp config set <key> <val> Set a config value
+  memory-mcp config reset           Reset config to defaults
+  memory-mcp config path            Show config file path
 
 Options:
   --claude    Target Claude Code CLI instead of GitHub Copilot CLI
 
 The MCP server itself is started automatically by the host CLI.`);
     process.exit(0);
+  }
+
+  if (command === "config") {
+    handleConfig(args.slice(1));
+    return;
   }
 
   const target = flags.has("--claude") ? "claude" : "copilot";
@@ -298,6 +422,9 @@ The MCP server itself is started automatically by the host CLI.`);
 
   // --- setup ---
   console.log(`Setting up memory-mcp for ${profile.name}...\n`);
+
+  // Migrate from legacy dirs if this is a fresh workspace
+  migrateFromLegacyDirs(profile.workspaceDir);
 
   const mcpResult = setupMcpConfig(profile);
   console.log(mcpResult.changed ? `✓ ${mcpResult.message}` : `  ${mcpResult.message}`);

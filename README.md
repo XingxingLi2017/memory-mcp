@@ -39,7 +39,7 @@ Vector search uses [node-llama-cpp](https://github.com/withcatai/node-llama-cpp)
 
 If they fail to install (e.g. missing build tools), the server still works with FTS5-only search — no manual intervention needed.
 
-The default embedding model ([embeddinggemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF), ~328 MB) is downloaded automatically on first use to `~/.node-llama-cpp/models/`. You can swap it via the `MEMORY_MCP_MODEL` environment variable (see [Environment Variables](#environment-variables)).
+The default embedding model ([embeddinggemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF), ~328 MB) is downloaded automatically on first use to `~/.node-llama-cpp/models/`. You can swap it via config: `memory-mcp config set model /path/to/model.gguf` (see [Configuration](#configuration)).
 
 ### Windows: Known Issue with Prebuilt Binaries
 
@@ -56,13 +56,12 @@ This compiles with the correct Windows API path and restores full multi-threaded
 
 ## Usage
 
-Memory files live in a dot-directory under your home folder:
-
-- **Copilot CLI**: `~/.copilot/` (default)
-- **Claude Code**: `~/.claude/` (when using `--claude`)
+All memory data lives in a single shared directory, used by both Copilot CLI and Claude Code:
 
 ```
-~/.copilot/  (or ~/.claude/)
+~/.memory-mcp-workdir/
+├── memory-mcp.json        # Configuration file
+├── memory.db              # SQLite database (index + vectors)
 ├── MEMORY.md              # Top-level memory file
 └── memory/
     ├── decisions.md       # Architecture decisions
@@ -95,20 +94,44 @@ The host CLI will automatically search these files before answering questions ab
 6. Search runs both FTS5 (BM25 ranking) and vector (cosine similarity) in parallel
 7. Results are **min-max normalized** then merged with 50/50 weighting
 8. Access-count boost gently promotes frequently retrieved chunks
-9. Falls back to LIKE search if FTS5 is unavailable
+9. Top-level `MEMORY.md` results receive a score boost (×1.3) for long-term memory priority
+10. Falls back to LIKE search if FTS5 is unavailable
 
-## Environment Variables
+## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MEMORY_MCP_MODEL` | `hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf` | Embedding model. Accepts a HuggingFace URI (`hf:org/repo/file.gguf`) for auto-download, or a local file path (`/path/to/model.gguf`) |
-| `MEMORY_WORKSPACE` | `~/.copilot` | Root directory to scan for memory files |
-| `MEMORY_DB_PATH` | `~/.copilot/memory.db` | Path to SQLite database |
-| `MEMORY_CHUNK_SIZE` | `512` | Chunk size in tokens for markdown splitting (64–4096). Changing triggers automatic index rebuild |
-| `MEMORY_TOKEN_MAX` | `4096` | Default max tokens per search response (100–16384). Controls snippet length and result count |
-| `MEMORY_SESSION_DAYS` | `30` | Only index session transcripts from the last N days (0 = index all) |
-| `MEMORY_SESSION_MAX` | `-1` | Max number of sessions to index, newest first (-1 = no limit, 0 = disable session indexing) |
-| `MEMORY_EXTRA_DIRS` | _(none)_ | Comma-separated extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
+All settings have sensible defaults and work out of the box. To customize, use the config command:
+
+```bash
+# Show current config
+memory-mcp config
+
+# Set a value
+memory-mcp config set chunkSize 1024
+memory-mcp config set extraDirs /data/obsidian-vault,/data/notes
+memory-mcp config set model /path/to/local-model.gguf
+
+# Reset to defaults
+memory-mcp config reset
+
+# Show config file path
+memory-mcp config path
+```
+
+Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$HOME` on Linux/macOS, `%USERPROFILE%` on Windows). Changes take effect on next server restart.
+
+### Config Keys
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `workspace` | `~/.memory-mcp-workdir` | Root directory for memory files and database |
+| `dbPath` | `<workspace>/memory.db` | Path to SQLite database |
+| `chunkSize` | `512` | Chunk size in tokens for markdown splitting (64–4096). Changing triggers automatic index rebuild |
+| `tokenMax` | `4096` | Default max tokens per search response (100–16384). Controls snippet length and result count |
+| `sessionDays` | `30` | Only index session transcripts from the last N days (0 = index all) |
+| `sessionMax` | `-1` | Max number of sessions to index, newest first (-1 = no limit, 0 = disable session indexing) |
+| `sessionDirs` | `[copilot, claude]` | Session transcript sources. Default: `~/.copilot/session-state` (copilot) + `~/.claude/projects` (claude). Set to override entirely. JSON format: `[{"dir":"/path","kind":"copilot"}]` |
+| `extraDirs` | `[]` | Extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
+| `model` | `hf:ggml-org/embeddinggemma-300M-GGUF/...` | Embedding model. Accepts a HuggingFace URI (`hf:org/repo/file.gguf`) for auto-download, or a local file path (`/path/to/model.gguf`) |
 
 ## CLI
 
@@ -122,9 +145,22 @@ memory-mcp-cli search "query" --max-results 10 --min-score 0.1
 memory-mcp-cli status
 ```
 
+All config keys can be temporarily overridden via CLI flags:
+
+```bash
+memory-mcp-cli search "query" --workspace /tmp/alt-memory
+memory-mcp-cli status --chunk-size 1024 --session-days 7
+```
+
 Or run directly: `node dist/cli.js search "query"`
 
 Output is JSON to stdout, suitable for piping into other tools.
+
+## Upgrading
+
+When upgrading from a version that used `~/.copilot/` or `~/.claude/` as the workspace, `memory-mcp setup` (or the MCP server on first start) will automatically copy your memory files to `~/.memory-mcp-workdir/`. Original files are preserved — remove them manually when ready.
+
+**Breaking change:** All `MEMORY_*` environment variables have been removed. Configuration is now managed entirely through the config file (`~/.memory-mcp-workdir/memory-mcp.json`). Use `memory-mcp config set <key> <value>` to migrate your settings.
 
 ## Uninstall
 

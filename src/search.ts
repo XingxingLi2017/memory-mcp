@@ -184,6 +184,9 @@ export async function searchMemory(
     results = searchLike(db, cleaned, maxResults, snippetMaxChars, allowedPaths);
   }
 
+  // Boost MEMORY.md before truncation so it isn't cut by maxResults
+  applyMemoryFileBoost(results);
+
   results = results.slice(0, maxResults);
   bumpAccessCount(db, results);
   const boosted = applyAccessBoost(db, results);
@@ -399,3 +402,25 @@ function applyAccessBoost(db: Database.Database, results: SearchResult[]): Searc
 }
 
 // searchFacts removed in schema v8 — facts indexed via normal chunk pipeline
+
+/** Top-level memory files that receive a score boost (long-term memory). */
+const BOOSTED_PATHS = new Set(["MEMORY.md", "memory.md", "MEMORY.txt", "memory.txt"]);
+
+/** Boost factor for top-level memory file results (score × 1.3). */
+// TODO: consider making this configurable for users who want to boost other files (e.g. extra dirs)
+const MEMORY_FILE_BOOST = 0.3;
+
+/**
+ * Boost scores for chunks from the top-level MEMORY.md file and re-sort.
+ * MEMORY.md is the user's curated long-term memory — it should rank higher
+ * than session transcripts or sub-directory files at similar relevance.
+ */
+function applyMemoryFileBoost(results: SearchResult[]): void {
+  if (results.length <= 1) return;
+  for (const r of results) {
+    if (BOOSTED_PATHS.has(r.path)) {
+      r.score *= 1 + MEMORY_FILE_BOOST;
+    }
+  }
+  results.sort((a, b) => b.score - a.score);
+}

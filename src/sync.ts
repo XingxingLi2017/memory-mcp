@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import type { SessionDirConfig } from "./config.js";
 import {
   hashText,
   listMemoryFiles,
@@ -160,11 +161,12 @@ function indexFile(
  */
 export async function syncSessionFiles(
   db: Database.Database,
-  opts?: { force?: boolean; chunkSize?: number; maxDays?: number; maxCount?: number },
+  opts?: { force?: boolean; chunkSize?: number; maxDays?: number; maxCount?: number; sessionDirs?: SessionDirConfig[] },
 ): Promise<SyncResult> {
   const files = await listSessionFiles({
     maxDays: opts?.maxDays,
     maxCount: opts?.maxCount,
+    sessionDirs: opts?.sessionDirs,
   });
   const ftsOk = isFtsAvailable(db);
   const activePaths = new Set<string>();
