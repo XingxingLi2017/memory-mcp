@@ -90,7 +90,8 @@ function getHomeDir(): string {
 
 function buildProfile(target: "copilot" | "claude"): TargetProfile {
   const home = getHomeDir();
-  const workspaceDir = DEFAULTS.workspace; // shared: ~/.memory-mcp-workdir
+  const config = loadConfig();
+  const workspaceDir = config.workspace; // resolved from default profile
   if (target === "claude") {
     const claudeDir = path.join(home, ".claude");
     return {
@@ -423,17 +424,10 @@ function handleConfig(args: string[]): void {
       (partial as Record<string, unknown>)[key] = value;
     }
 
-    if (profileName) {
-      saveProfileConfig(profileName, partial);
-      console.log(`✓ [${profileName}] ${key} = ${JSON.stringify(partial[key])}`);
-    } else {
-      // Save to top-level (shared across profiles)
-      const filePath = configFilePath();
-      const existing = readConfigFile(filePath);
-      Object.assign(existing, partial);
-      saveConfigFile(existing, filePath);
-      console.log(`✓ ${key} = ${JSON.stringify(partial[key])}`);
-    }
+    // Save to the specified profile, or the default profile if not specified
+    const targetProfile = profileName ?? getDefaultProfile();
+    saveProfileConfig(targetProfile, partial);
+    console.log(`✓ [${targetProfile}] ${key} = ${JSON.stringify(partial[key])}`);
     console.log(`  Saved to ${configFilePath()}`);
     return;
   }
@@ -496,6 +490,13 @@ Use --profile <name> with the server: node dist/server.js --profile <name>`);
 
   // --- setup ---
   console.log(`Setting up memory-mcp for ${profile.name}...\n`);
+
+  // Initialize config file with default profile if it doesn't exist
+  const cfgPath = configFilePath();
+  if (!fs.existsSync(cfgPath)) {
+    createProfile(DEFAULT_PROFILE);
+    console.log(`✓ Created config with "${DEFAULT_PROFILE}" profile at ${cfgPath}`);
+  }
 
   // Migrate from legacy dirs if this is a fresh workspace
   migrateFromLegacyDirs(profile.workspaceDir);

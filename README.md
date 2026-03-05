@@ -56,19 +56,18 @@ This compiles with the correct Windows API path and restores full multi-threaded
 
 ## Usage
 
-All memory data lives in a single shared directory, used by both Copilot CLI and Claude Code:
+All memory data lives in a shared directory under your home folder:
 
 ```
 ~/.memory-mcp-workdir/
-├── memory-mcp.json        # Configuration file
-├── memory.db              # SQLite database (index + vectors)
-├── MEMORY.md              # Top-level memory file
-└── memory/
-    ├── decisions.md       # Architecture decisions
-    ├── preferences.md     # User preferences
-    ├── context.md         # Project context
-    └── evidence/          # Auto-generated evidence files
-        └── a1b2c3d4e5f6.md  # Linked to a fact via [ref:...]
+├── memory-mcp.json              # Configuration file (profiles, settings)
+└── default/                     # Default profile workspace
+    ├── memory.db                # SQLite database (index + vectors)
+    ├── MEMORY.md                # Top-level memory file
+    └── memory/
+        ├── decisions.md         # Architecture decisions
+        ├── preferences.md       # User preferences
+        └── evidence/            # Auto-generated evidence files
 ```
 
 The host CLI will automatically search these files before answering questions about prior work, decisions, or preferences.
