@@ -11,6 +11,7 @@ import { openDatabase } from "./db.js";
 import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
 import { loadConfig, resolvedExtraDirs, type MemoryConfigFile } from "./config.js";
+import { setModelSpec } from "./embedding.js";
 
 function printUsage(): void {
   console.error(`Usage: memory-mcp-cli <command> [options]
@@ -138,6 +139,7 @@ async function main(): Promise<void> {
   const config = hasOpts
     ? loadConfig({ profile, overrides })
     : loadConfig();
+  setModelSpec(config.model);
   const workspaceDir = config.workspace;
   const dbPath = config.dbPath;
   const db = await openDatabase(dbPath, { chunkSize: config.chunkSize });

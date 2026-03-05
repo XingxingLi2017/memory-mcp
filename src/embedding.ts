@@ -12,8 +12,14 @@ function isHfUri(s: string): boolean {
   return s.startsWith("hf:");
 }
 
-/** Cached model spec — read from config once on first use. */
+/** Cached model spec — set once by the caller (server/cli) or read from default config. */
 let cachedModelSpec: string | null = null;
+
+/** Set the model spec from the resolved config. Call before first embedding use. */
+export function setModelSpec(model: string): void {
+  cachedModelSpec = model;
+}
+
 function resolveModelSpec(): string {
   if (!cachedModelSpec) cachedModelSpec = loadConfig().model;
   return cachedModelSpec;

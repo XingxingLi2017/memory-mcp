@@ -10,11 +10,14 @@ import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
 import { MEMORY_EXTENSIONS, hashText, buildExtraDirAliases } from "./internal.js";
 import { loadConfig, resolvedExtraDirs, migrateFromLegacyDirs, listProfiles } from "./config.js";
+import { setModelSpec } from "./embedding.js";
 
-// Parse --profile from process.argv (before MCP takes over stdio)
+// Parse --profile from process.argv or MEMORY_MCP_PROFILE env var
 const serverProfile = (() => {
   const idx = process.argv.indexOf("--profile");
-  return idx >= 0 && process.argv[idx + 1] ? process.argv[idx + 1] : undefined;
+  return (idx >= 0 && process.argv[idx + 1])
+    ? process.argv[idx + 1]
+    : (process.env.MEMORY_MCP_PROFILE || undefined);
 })();
 
 if (serverProfile) {
@@ -25,6 +28,7 @@ if (serverProfile) {
 }
 
 const config = loadConfig({ profile: serverProfile });
+setModelSpec(config.model);
 
 // Auto-migrate from legacy dirs on first server start (non-fatal)
 try {

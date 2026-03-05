@@ -171,7 +171,7 @@ memory-mcp config profile create coding
 memory-mcp config profile create learning
 
 # Configure each profile independently
-memory-mcp config --profile coding set sessionDirs '[{"dir":"~/.copilot/session-state","kind":"copilot"},{"dir":"~/.claude/projects","kind":"claude"}]'
+memory-mcp config --profile coding set sessionDirs '[{"dir":"/home/user/.copilot/session-state","kind":"copilot"},{"dir":"/home/user/.claude/projects","kind":"claude"}]'
 memory-mcp config --profile learning set extraDirs /path/to/obsidian-vault
 memory-mcp config --profile learning set sessionDirs '[]'
 
@@ -187,6 +187,8 @@ memory-mcp-cli search "query" --profile learning
 # Use a specific profile with the MCP server
 # In your MCP host config (e.g. .claude.json):
 #   "args": ["dist/server.js", "--profile", "coding"]
+# Or via environment variable:
+#   "env": { "MEMORY_MCP_PROFILE": "coding" }
 ```
 
 Each profile workspace lives at `~/.memory-mcp-workdir/<profile-name>/` by default.

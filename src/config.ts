@@ -169,7 +169,11 @@ export function loadConfig(
 
   return {
     workspace,
-    dbPath: overrides?.dbPath ?? file.dbPath ?? path.join(workspace, "memory.db"),
+    // dbPath: like workspace, not inherited from top-level in profile mode to maintain isolation
+    dbPath: overrides?.dbPath
+      ?? profileData.dbPath
+      ?? (isLegacyFormat ? topLevel.dbPath : undefined)
+      ?? path.join(workspace, "memory.db"),
     chunkSize: clamp(overrides?.chunkSize ?? file.chunkSize, 64, 4096, DEFAULTS.chunkSize),
     tokenMax: clamp(overrides?.tokenMax ?? file.tokenMax, 100, 16384, DEFAULTS.tokenMax),
     sessionDays: clamp(overrides?.sessionDays ?? file.sessionDays, 0, Infinity, DEFAULTS.sessionDays),
@@ -198,6 +202,14 @@ export function getDefaultProfile(configPath?: string): string {
   return fileData.defaultProfile ?? DEFAULT_PROFILE;
 }
 
+/** Ensure fileData has a profiles section. Migrates legacy workspace if needed. */
+function ensureProfilesSection(fileData: ConfigFileData): void {
+  if (!fileData.profiles && fileData.workspace) {
+    fileData.profiles = { [DEFAULT_PROFILE]: { workspace: fileData.workspace } };
+  }
+  if (!fileData.profiles) fileData.profiles = {};
+}
+
 /** Save config for a specific profile. */
 export function saveProfileConfig(
   profileName: string,
@@ -207,14 +219,13 @@ export function saveProfileConfig(
   validateProfileName(profileName);
   const filePath = configPath ?? configFilePath();
   const fileData = readConfigFile(filePath);
+  ensureProfilesSection(fileData);
 
-  // Migrate legacy flat format: preserve top-level workspace in default profile
-  if (!fileData.profiles && fileData.workspace) {
-    fileData.profiles = { [DEFAULT_PROFILE]: { workspace: fileData.workspace } };
+  if (!fileData.profiles![profileName]) {
+    console.error(`[memory-mcp] Note: Profile "${profileName}" created implicitly via config set.`);
   }
-  if (!fileData.profiles) fileData.profiles = {};
 
-  fileData.profiles[profileName] = { ...(fileData.profiles[profileName] ?? {}), ...partial };
+  fileData.profiles![profileName] = { ...(fileData.profiles![profileName] ?? {}), ...partial };
   saveConfigFile(fileData, filePath);
 }
 
@@ -223,15 +234,10 @@ export function createProfile(profileName: string, configPath?: string): boolean
   validateProfileName(profileName);
   const filePath = configPath ?? configFilePath();
   const fileData = readConfigFile(filePath);
+  ensureProfilesSection(fileData);
 
-  // Migrate legacy flat format: preserve top-level workspace in default profile
-  if (!fileData.profiles && fileData.workspace) {
-    fileData.profiles = { [DEFAULT_PROFILE]: { workspace: fileData.workspace } };
-  }
-  if (!fileData.profiles) fileData.profiles = {};
-
-  if (fileData.profiles[profileName]) return false;
-  fileData.profiles[profileName] = {};
+  if (fileData.profiles![profileName]) return false;
+  fileData.profiles![profileName] = {};
   saveConfigFile(fileData, filePath);
   return true;
 }
@@ -245,6 +251,9 @@ export function deleteProfile(profileName: string, configPath?: string): boolean
   delete fileData.profiles[profileName];
   if (fileData.defaultProfile === profileName) {
     const remaining = Object.keys(fileData.profiles);
+    if (remaining.length === 0) {
+      console.error(`[memory-mcp] Warning: No profiles remaining. Default reset to "${DEFAULT_PROFILE}".`);
+    }
     fileData.defaultProfile = remaining[0] ?? DEFAULT_PROFILE;
   }
   saveConfigFile(fileData, filePath);
