@@ -153,14 +153,18 @@ export function loadConfig(
 
   // Merge: profile-specific fields over top-level fields
   const profileData = fileData.profiles?.[profileName] ?? {};
+  const isLegacyFormat = !fileData.profiles;
 
-  // Top-level fields (legacy flat format or shared defaults), excluding workspace
-  // workspace is NOT inherited from top-level to avoid legacy flat config polluting new profiles
-  const { profiles: _, defaultProfile: __, workspace: _topWorkspace, ...topLevel } = fileData;
+  // Top-level fields (legacy flat format or shared defaults)
+  // In legacy format (no profiles section): inherit top-level workspace for backward compat
+  // In profile format: workspace only comes from profile or profileName to avoid cross-pollution
+  const { profiles: _, defaultProfile: __, ...topLevel } = fileData;
   const file: MemoryConfigFile = { ...topLevel, ...profileData };
 
   const overrides = opts?.overrides;
-  const workspace = overrides?.workspace ?? profileData.workspace
+  const workspace = overrides?.workspace
+    ?? profileData.workspace
+    ?? (isLegacyFormat ? topLevel.workspace : undefined)
     ?? path.join(DEFAULT_WORKDIR, profileName);
 
   return {
@@ -303,11 +307,14 @@ export function migrateFromLegacyDirs(workspaceDir: string): void {
   const hasMemoryDir = fs.existsSync(path.join(workspaceDir, "memory"));
   if (hasMemoryFile || hasMemoryDir) return;
 
-  // Legacy sources: ~/.copilot, ~/.claude, and the workdir root (pre-profile layout)
+  // Legacy sources: ~/.copilot, ~/.claude
+  // Also include workdir root (pre-profile layout) but ONLY for the default profile
+  // to prevent old root data from bleeding into every new profile
+  const isDefaultProfile = workspaceDir === path.join(DEFAULT_WORKDIR, DEFAULT_PROFILE);
   const legacyDirs = [
     path.join(HOME, ".copilot"),
     path.join(HOME, ".claude"),
-    DEFAULT_WORKDIR, // pre-profile: files were in workdir root, not /default/
+    ...(isDefaultProfile ? [DEFAULT_WORKDIR] : []),
   ].filter((d) => d !== workspaceDir); // don't migrate from self
 
   let migrated = false;
