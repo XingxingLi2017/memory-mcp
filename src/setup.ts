@@ -7,7 +7,8 @@ import {
   loadConfig, readConfigFile, saveConfigFile, deleteConfigFile,
   configFilePath, DEFAULTS, migrateFromLegacyDirs,
   listProfiles, getDefaultProfile, createProfile, deleteProfile,
-  saveProfileConfig, setDefaultProfile, DEFAULT_PROFILE,
+  saveProfileConfig, setDefaultProfile, resetProfile,
+  DEFAULT_PROFILE, DEFAULT_WORKDIR, validateProfileName,
   type MemoryConfig, type MemoryConfigFile,
 } from "./config.js";
 
@@ -315,6 +316,10 @@ function handleConfig(args: string[]): void {
       if (!name) { console.error("Usage: memory-mcp config profile delete <name>"); process.exit(1); }
       if (deleteProfile(name)) {
         console.log(`✓ Profile "${name}" deleted.`);
+        const wsDir = path.join(DEFAULT_WORKDIR, name);
+        if (fs.existsSync(wsDir)) {
+          console.log(`  Note: Workspace directory retained at ${wsDir} — remove manually if no longer needed.`);
+        }
       } else {
         console.log(`  Profile "${name}" not found.`);
       }
@@ -348,9 +353,9 @@ function handleConfig(args: string[]): void {
 
   if (sub === "reset") {
     if (profileName) {
-      // Reset specific profile
-      if (deleteProfile(profileName)) {
-        console.log(`✓ Profile "${profileName}" deleted (reset).`);
+      // Reset profile config to empty (keeps the profile entry)
+      if (resetProfile(profileName)) {
+        console.log(`✓ Profile "${profileName}" reset to defaults.`);
       } else {
         console.log(`  Profile "${profileName}" not found.`);
       }

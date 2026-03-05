@@ -9,13 +9,20 @@ import { openDatabase } from "./db.js";
 import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
 import { MEMORY_EXTENSIONS, hashText, buildExtraDirAliases } from "./internal.js";
-import { loadConfig, resolvedExtraDirs, migrateFromLegacyDirs } from "./config.js";
+import { loadConfig, resolvedExtraDirs, migrateFromLegacyDirs, listProfiles } from "./config.js";
 
 // Parse --profile from process.argv (before MCP takes over stdio)
 const serverProfile = (() => {
   const idx = process.argv.indexOf("--profile");
   return idx >= 0 && process.argv[idx + 1] ? process.argv[idx + 1] : undefined;
 })();
+
+if (serverProfile) {
+  const known = listProfiles();
+  if (!known.includes(serverProfile)) {
+    console.error(`[memory-mcp] Warning: profile "${serverProfile}" not found in config. Using defaults.`);
+  }
+}
 
 const config = loadConfig({ profile: serverProfile });
 

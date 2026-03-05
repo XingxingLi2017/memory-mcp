@@ -130,8 +130,8 @@ Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$H
       "sessionDays": 30,
       "sessionMax": -1,
       "sessionDirs": [
-        { "dir": "~/.copilot/session-state", "kind": "copilot" },
-        { "dir": "~/.claude/projects", "kind": "claude" }
+        { "dir": "/home/user/.copilot/session-state", "kind": "copilot" },
+        { "dir": "/home/user/.claude/projects", "kind": "claude" }
       ]
     },
     "learning": {
@@ -142,6 +142,8 @@ Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$H
   }
 }
 ```
+
+> **Note:** Use absolute paths in the config file. `~` is not expanded by Node.js.
 
 Fields omitted from a profile inherit built-in defaults. Each profile workspace is at `~/.memory-mcp-workdir/<profile-name>/` unless overridden.
 

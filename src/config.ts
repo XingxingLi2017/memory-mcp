@@ -41,6 +41,14 @@ export type ConfigFileData = MemoryConfigFile & {
 
 export const DEFAULT_PROFILE = "default";
 
+/** Validate profile name: only [a-zA-Z0-9_-], no path traversal. */
+const VALID_PROFILE_RE = /^[a-zA-Z0-9_-]+$/;
+export function validateProfileName(name: string): void {
+  if (!VALID_PROFILE_RE.test(name)) {
+    throw new Error(`Invalid profile name "${name}". Only letters, numbers, hyphens and underscores allowed.`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
@@ -141,16 +149,18 @@ export function loadConfig(
 
   // Determine which profile to use
   const profileName = opts?.profile ?? fileData.defaultProfile ?? DEFAULT_PROFILE;
+  validateProfileName(profileName);
 
   // Merge: profile-specific fields over top-level fields
   const profileData = fileData.profiles?.[profileName] ?? {};
 
-  // Top-level fields (legacy flat format or shared defaults)
-  const { profiles: _, defaultProfile: __, ...topLevel } = fileData;
+  // Top-level fields (legacy flat format or shared defaults), excluding workspace
+  // workspace is NOT inherited from top-level to avoid legacy flat config polluting new profiles
+  const { profiles: _, defaultProfile: __, workspace: _topWorkspace, ...topLevel } = fileData;
   const file: MemoryConfigFile = { ...topLevel, ...profileData };
 
   const overrides = opts?.overrides;
-  const workspace = overrides?.workspace ?? file.workspace
+  const workspace = overrides?.workspace ?? profileData.workspace
     ?? path.join(DEFAULT_WORKDIR, profileName);
 
   return {
@@ -190,6 +200,7 @@ export function saveProfileConfig(
   partial: MemoryConfigFile,
   configPath?: string,
 ): void {
+  validateProfileName(profileName);
   const filePath = configPath ?? configFilePath();
   const fileData = readConfigFile(filePath);
   if (!fileData.profiles) fileData.profiles = {};
@@ -199,18 +210,19 @@ export function saveProfileConfig(
 
 /** Create a new profile (empty config). Returns false if already exists. */
 export function createProfile(profileName: string, configPath?: string): boolean {
+  validateProfileName(profileName);
   const filePath = configPath ?? configFilePath();
   const fileData = readConfigFile(filePath);
   if (!fileData.profiles) fileData.profiles = {};
   if (fileData.profiles[profileName]) return false;
   fileData.profiles[profileName] = {};
-  if (!fileData.defaultProfile) fileData.defaultProfile = profileName;
   saveConfigFile(fileData, filePath);
   return true;
 }
 
 /** Delete a profile. Returns false if not found. */
 export function deleteProfile(profileName: string, configPath?: string): boolean {
+  validateProfileName(profileName);
   const filePath = configPath ?? configFilePath();
   const fileData = readConfigFile(filePath);
   if (!fileData.profiles?.[profileName]) return false;
@@ -223,8 +235,20 @@ export function deleteProfile(profileName: string, configPath?: string): boolean
   return true;
 }
 
+/** Reset a profile config to empty (keeps the profile entry). Returns false if not found. */
+export function resetProfile(profileName: string, configPath?: string): boolean {
+  validateProfileName(profileName);
+  const filePath = configPath ?? configFilePath();
+  const fileData = readConfigFile(filePath);
+  if (!fileData.profiles?.[profileName]) return false;
+  fileData.profiles[profileName] = {};
+  saveConfigFile(fileData, filePath);
+  return true;
+}
+
 /** Set the default profile. */
 export function setDefaultProfile(profileName: string, configPath?: string): void {
+  validateProfileName(profileName);
   const filePath = configPath ?? configFilePath();
   const fileData = readConfigFile(filePath);
   fileData.defaultProfile = profileName;
