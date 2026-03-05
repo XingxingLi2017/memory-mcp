@@ -207,7 +207,13 @@ export function saveProfileConfig(
   validateProfileName(profileName);
   const filePath = configPath ?? configFilePath();
   const fileData = readConfigFile(filePath);
+
+  // Migrate legacy flat format: preserve top-level workspace in default profile
+  if (!fileData.profiles && fileData.workspace) {
+    fileData.profiles = { [DEFAULT_PROFILE]: { workspace: fileData.workspace } };
+  }
   if (!fileData.profiles) fileData.profiles = {};
+
   fileData.profiles[profileName] = { ...(fileData.profiles[profileName] ?? {}), ...partial };
   saveConfigFile(fileData, filePath);
 }
