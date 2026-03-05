@@ -144,9 +144,8 @@ export async function searchMemory(
           `SELECT v.id, v.distance, c.path, c.source, c.start_line, c.end_line, c.text
            FROM chunks_vec v
            JOIN chunks c ON c.id = v.id
-           WHERE embedding MATCH ?
-           ORDER BY distance
-           LIMIT ?`,
+           WHERE embedding MATCH ? AND k = ?
+           ORDER BY distance`,
         )
         .all(queryBuf, maxResults * 3) as Array<{
         id: string;
