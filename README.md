@@ -118,6 +118,33 @@ memory-mcp config path
 
 Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$HOME` on Linux/macOS, `%USERPROFILE%` on Windows). Changes take effect on next server restart.
 
+### Example Config File
+
+```json
+{
+  "defaultProfile": "default",
+  "profiles": {
+    "default": {
+      "chunkSize": 512,
+      "tokenMax": 4096,
+      "sessionDays": 30,
+      "sessionMax": -1,
+      "sessionDirs": [
+        { "dir": "~/.copilot/session-state", "kind": "copilot" },
+        { "dir": "~/.claude/projects", "kind": "claude" }
+      ]
+    },
+    "learning": {
+      "extraDirs": ["/path/to/obsidian-vault"],
+      "sessionDirs": [],
+      "model": "/path/to/local-model.gguf"
+    }
+  }
+}
+```
+
+Fields omitted from a profile inherit built-in defaults. Each profile workspace is at `~/.memory-mcp-workdir/<profile-name>/` unless overridden.
+
 ### Config Keys
 
 | Key | Default | Description |

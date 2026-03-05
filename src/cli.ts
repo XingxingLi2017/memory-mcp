@@ -19,21 +19,17 @@ Commands:
   search <query>    Search memory files
     --max-results N   Max results (default: 10)
     --min-score N     Minimum relevance score 0-1 (default: 0.01)
-    --token-max N     Max tokens in response (default: 4096)
+    --token-max N     Max tokens in response (default: from config)
 
   status            Show index status
 
-Global flags (override config for this run):
+Global flags:
   --profile <name>      Use a named profile (default: from config)
-  --config <path>       Use a custom config file
-  --workspace <path>    Override workspace directory
-  --db-path <path>      Override database path
-  --chunk-size N        Override chunk size
-  --session-days N      Override session days
-  --session-max N       Override session max
-  --session-dirs <json> Override session dirs (JSON array)
-  --extra-dirs <paths>  Override extra dirs (comma-separated)
-  --model <path>        Override embedding model
+
+  Override config for this run (optional):
+    --workspace <path>    --db-path <path>      --chunk-size N
+    --session-days N      --session-max N       --model <path>
+    --session-dirs <json> --extra-dirs <paths>
 
 Configuration:
   All settings are read from ~/.memory-mcp-workdir/memory-mcp.json.
@@ -83,19 +79,17 @@ function parsePositiveFloat(val: string | undefined, name: string): number | und
 
 /** Global config flags (kebab-case). Extracted before command-specific parsing. */
 const GLOBAL_FLAGS = new Set([
-  "config", "profile", "workspace", "db-path", "chunk-size", "token-max",
+  "profile", "workspace", "db-path", "chunk-size", "token-max",
   "session-days", "session-max", "session-dirs", "extra-dirs", "model",
 ]);
 
-/** Extract global config overrides from opts, returning {overrides, configPath, profile, rest}. */
+/** Extract global config overrides from opts, returning {overrides, profile, rest}. */
 function extractGlobalOverrides(opts: Record<string, string>): {
   overrides: MemoryConfigFile;
-  configPath?: string;
   profile?: string;
   rest: Record<string, string>;
 } {
   const overrides: MemoryConfigFile = {};
-  let configPath: string | undefined;
   let profile: string | undefined;
   const rest: Record<string, string> = {};
 
@@ -105,7 +99,6 @@ function extractGlobalOverrides(opts: Record<string, string>): {
       continue;
     }
     switch (key) {
-      case "config": configPath = value; break;
       case "profile": profile = value; break;
       case "workspace": overrides.workspace = path.resolve(value); break;
       case "db-path": overrides.dbPath = path.resolve(value); break;
@@ -125,7 +118,7 @@ function extractGlobalOverrides(opts: Record<string, string>): {
     }
   }
 
-  return { overrides, configPath, profile, rest };
+  return { overrides, profile, rest };
 }
 
 async function main(): Promise<void> {
@@ -136,10 +129,10 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const { overrides, configPath, profile, rest } = extractGlobalOverrides(opts);
-  const hasOpts = Object.keys(overrides).length > 0 || configPath || profile;
+  const { overrides, profile, rest } = extractGlobalOverrides(opts);
+  const hasOpts = Object.keys(overrides).length > 0 || profile;
   const config = hasOpts
-    ? loadConfig({ profile, overrides, configPath })
+    ? loadConfig({ profile, overrides })
     : loadConfig();
   const workspaceDir = config.workspace;
   const dbPath = config.dbPath;

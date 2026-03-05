@@ -279,10 +279,12 @@ export function migrateFromLegacyDirs(workspaceDir: string): void {
   const hasMemoryDir = fs.existsSync(path.join(workspaceDir, "memory"));
   if (hasMemoryFile || hasMemoryDir) return;
 
+  // Legacy sources: ~/.copilot, ~/.claude, and the workdir root (pre-profile layout)
   const legacyDirs = [
     path.join(HOME, ".copilot"),
     path.join(HOME, ".claude"),
-  ];
+    DEFAULT_WORKDIR, // pre-profile: files were in workdir root, not /default/
+  ].filter((d) => d !== workspaceDir); // don't migrate from self
 
   let migrated = false;
 
