@@ -328,8 +328,12 @@ function handleConfig(args: string[]): void {
     if (action === "default") {
       const name = filteredArgs[2];
       if (!name) { console.error("Usage: memory-mcp config profile default <name>"); process.exit(1); }
-      setDefaultProfile(name);
-      console.log(`✓ Default profile set to "${name}".`);
+      if (setDefaultProfile(name)) {
+        console.log(`✓ Default profile set to "${name}".`);
+      } else {
+        console.error(`Profile "${name}" not found. Create it first: memory-mcp config profile create ${name}`);
+        process.exit(1);
+      }
       return;
     }
     console.error("Usage: memory-mcp config profile [list|create|delete|default] [name]");

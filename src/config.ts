@@ -262,13 +262,15 @@ export function resetProfile(profileName: string, configPath?: string): boolean 
   return true;
 }
 
-/** Set the default profile. */
-export function setDefaultProfile(profileName: string, configPath?: string): void {
+/** Set the default profile. Returns false if the profile doesn't exist. */
+export function setDefaultProfile(profileName: string, configPath?: string): boolean {
   validateProfileName(profileName);
   const filePath = configPath ?? configFilePath();
   const fileData = readConfigFile(filePath);
+  if (!fileData.profiles?.[profileName]) return false;
   fileData.defaultProfile = profileName;
   saveConfigFile(fileData, filePath);
+  return true;
 }
 
 /**
