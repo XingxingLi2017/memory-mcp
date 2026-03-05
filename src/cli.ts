@@ -11,6 +11,7 @@ import { openDatabase } from "./db.js";
 import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
 import { loadConfig, resolvedExtraDirs, type MemoryConfigFile } from "./config.js";
+import { setModelSpec } from "./embedding.js";
 
 function printUsage(): void {
   console.error(`Usage: memory-mcp-cli <command> [options]
@@ -19,26 +20,24 @@ Commands:
   search <query>    Search memory files
     --max-results N   Max results (default: 10)
     --min-score N     Minimum relevance score 0-1 (default: 0.01)
-    --token-max N     Max tokens in response (default: 4096)
+    --token-max N     Max tokens in response (default: from config)
 
   status            Show index status
 
-Global flags (override config for this run):
-  --config <path>       Use a custom config file
-  --workspace <path>    Override workspace directory
-  --db-path <path>      Override database path
-  --chunk-size N        Override chunk size
-  --session-days N      Override session days
-  --session-max N       Override session max
-  --session-dirs <json> Override session dirs (JSON array)
-  --extra-dirs <paths>  Override extra dirs (comma-separated)
-  --model <path>        Override embedding model
+Global flags:
+  --profile <name>      Use a named profile (default: from config)
+
+  Override config for this run (optional):
+    --workspace <path>    --db-path <path>      --chunk-size N
+    --session-days N      --session-max N       --model <path>
+    --session-dirs <json> --extra-dirs <paths>
 
 Configuration:
   All settings are read from ~/.memory-mcp-workdir/memory-mcp.json.
   Config is managed via the "memory-mcp" command (not memory-mcp-cli):
-    memory-mcp config            Show current settings
-    memory-mcp config set <k> <v> Set a value`);
+    memory-mcp config                       Show current settings
+    memory-mcp config --profile <n> show    Show profile settings
+    memory-mcp config profile list          List all profiles`);
 }
 
 function parseArgs(args: string[]): { command: string; query?: string; opts: Record<string, string> } {
@@ -81,27 +80,31 @@ function parsePositiveFloat(val: string | undefined, name: string): number | und
 
 /** Global config flags (kebab-case). Extracted before command-specific parsing. */
 const GLOBAL_FLAGS = new Set([
-  "config", "workspace", "db-path", "chunk-size", "token-max",
+  "profile", "workspace", "db-path", "chunk-size", "token-max",
   "session-days", "session-max", "session-dirs", "extra-dirs", "model",
 ]);
 
-/** Extract global config overrides from opts, returning {overrides, configPath, rest}. */
+/** Extract global config overrides from opts, returning {overrides, profile, rest}. */
 function extractGlobalOverrides(opts: Record<string, string>): {
   overrides: MemoryConfigFile;
-  configPath?: string;
+  profile?: string;
   rest: Record<string, string>;
 } {
   const overrides: MemoryConfigFile = {};
-  let configPath: string | undefined;
+  let profile: string | undefined;
   const rest: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(opts)) {
+    if (key === "config") {
+      console.error("[memory-mcp] Warning: --config flag is no longer supported. Use --profile instead.");
+      continue;
+    }
     if (!GLOBAL_FLAGS.has(key)) {
       rest[key] = value;
       continue;
     }
     switch (key) {
-      case "config": configPath = value; break;
+      case "profile": profile = value; break;
       case "workspace": overrides.workspace = path.resolve(value); break;
       case "db-path": overrides.dbPath = path.resolve(value); break;
       case "chunk-size": overrides.chunkSize = Number(value); break;
@@ -120,7 +123,7 @@ function extractGlobalOverrides(opts: Record<string, string>): {
     }
   }
 
-  return { overrides, configPath, rest };
+  return { overrides, profile, rest };
 }
 
 async function main(): Promise<void> {
@@ -131,9 +134,12 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const { overrides, configPath, rest } = extractGlobalOverrides(opts);
-  const hasOverrides = Object.keys(overrides).length > 0 || configPath;
-  const config = hasOverrides ? loadConfig(overrides, configPath) : loadConfig();
+  const { overrides, profile, rest } = extractGlobalOverrides(opts);
+  const hasOpts = Object.keys(overrides).length > 0 || profile;
+  const config = hasOpts
+    ? loadConfig({ profile, overrides })
+    : loadConfig();
+  setModelSpec(config.model);
   const workspaceDir = config.workspace;
   const dbPath = config.dbPath;
   const db = await openDatabase(dbPath, { chunkSize: config.chunkSize });

@@ -56,19 +56,18 @@ This compiles with the correct Windows API path and restores full multi-threaded
 
 ## Usage
 
-All memory data lives in a single shared directory, used by both Copilot CLI and Claude Code:
+All memory data lives in a shared directory under your home folder:
 
 ```
 ~/.memory-mcp-workdir/
-├── memory-mcp.json        # Configuration file
-├── memory.db              # SQLite database (index + vectors)
-├── MEMORY.md              # Top-level memory file
-└── memory/
-    ├── decisions.md       # Architecture decisions
-    ├── preferences.md     # User preferences
-    ├── context.md         # Project context
-    └── evidence/          # Auto-generated evidence files
-        └── a1b2c3d4e5f6.md  # Linked to a fact via [ref:...]
+├── memory-mcp.json              # Configuration file (profiles, settings)
+└── default/                     # Default profile workspace
+    ├── memory.db                # SQLite database (index + vectors)
+    ├── MEMORY.md                # Top-level memory file
+    └── memory/
+        ├── decisions.md         # Architecture decisions
+        ├── preferences.md       # User preferences
+        └── evidence/            # Auto-generated evidence files
 ```
 
 The host CLI will automatically search these files before answering questions about prior work, decisions, or preferences.
@@ -102,16 +101,25 @@ The host CLI will automatically search these files before answering questions ab
 All settings have sensible defaults and work out of the box. To customize, use the config command:
 
 ```bash
-# Show current config
+# Show current config (uses default profile)
 memory-mcp config
 
-# Set a value
+# Show config for a specific profile
+memory-mcp config --profile learning show
+
+# Set a value (on default profile)
 memory-mcp config set chunkSize 1024
 memory-mcp config set extraDirs /data/obsidian-vault,/data/notes
 memory-mcp config set model /path/to/local-model.gguf
 
-# Reset to defaults
+# Set a value on a specific profile
+memory-mcp config --profile learning set chunkSize 256
+
+# Reset to defaults (all profiles and settings)
 memory-mcp config reset
+
+# Reset a single profile to defaults (keeps the profile entry)
+memory-mcp config --profile learning reset
 
 # Show config file path
 memory-mcp config path
@@ -119,11 +127,40 @@ memory-mcp config path
 
 Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$HOME` on Linux/macOS, `%USERPROFILE%` on Windows). Changes take effect on next server restart.
 
+### Example Config File
+
+```json
+{
+  "defaultProfile": "default",
+  "profiles": {
+    "default": {
+      "chunkSize": 512,
+      "tokenMax": 4096,
+      "sessionDays": 30,
+      "sessionMax": -1,
+      "sessionDirs": [
+        { "dir": "/home/user/.copilot/session-state", "kind": "copilot" },
+        { "dir": "/home/user/.claude/projects", "kind": "claude" }
+      ]
+    },
+    "learning": {
+      "extraDirs": ["/path/to/obsidian-vault"],
+      "sessionDirs": [],
+      "model": "/path/to/local-model.gguf"
+    }
+  }
+}
+```
+
+> **Note:** Use absolute paths in the config file. `~` is not expanded by Node.js.
+
+Fields omitted from a profile inherit built-in defaults. Each profile workspace is at `~/.memory-mcp-workdir/<profile-name>/` unless overridden.
+
 ### Config Keys
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `workspace` | `~/.memory-mcp-workdir` | Root directory for memory files and database |
+| `workspace` | `~/.memory-mcp-workdir/<profile>` | Root directory for memory files and database |
 | `dbPath` | `<workspace>/memory.db` | Path to SQLite database |
 | `chunkSize` | `512` | Chunk size in tokens for markdown splitting (64–4096). Changing triggers automatic index rebuild |
 | `tokenMax` | `4096` | Default max tokens per search response (100–16384). Controls snippet length and result count |
@@ -132,6 +169,38 @@ Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$H
 | `sessionDirs` | `[copilot, claude]` | Session transcript sources. Default: `~/.copilot/session-state` (copilot) + `~/.claude/projects` (claude). Set to override entirely. JSON format: `[{"dir":"/path","kind":"copilot"}]` |
 | `extraDirs` | `[]` | Extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
 | `model` | `hf:ggml-org/embeddinggemma-300M-GGUF/...` | Embedding model. Accepts a HuggingFace URI (`hf:org/repo/file.gguf`) for auto-download, or a local file path (`/path/to/model.gguf`) |
+
+### Profiles
+
+Profiles let you maintain isolated memory spaces for different use cases (e.g. coding vs learning). Each profile has its own workspace, database, and memory files.
+
+```bash
+# Create profiles
+memory-mcp config profile create coding
+memory-mcp config profile create learning
+
+# Configure each profile independently
+memory-mcp config --profile coding set sessionDirs '[{"dir":"/home/user/.copilot/session-state","kind":"copilot"},{"dir":"/home/user/.claude/projects","kind":"claude"}]'
+memory-mcp config --profile learning set extraDirs /path/to/obsidian-vault
+memory-mcp config --profile learning set sessionDirs '[]'
+
+# Set which profile is used by default (e.g. by the MCP server)
+memory-mcp config profile default coding
+
+# List profiles
+memory-mcp config profile list
+
+# Use a specific profile with the CLI
+memory-mcp-cli search "query" --profile learning
+
+# Use a specific profile with the MCP server
+# In your MCP host config (e.g. .claude.json):
+#   "args": ["dist/server.js", "--profile", "coding"]
+# Or via environment variable:
+#   "env": { "MEMORY_MCP_PROFILE": "coding" }
+```
+
+Each profile workspace lives at `~/.memory-mcp-workdir/<profile-name>/` by default. Deleting a profile removes its config entry but **retains the workspace directory** on disk — remove it manually if no longer needed.
 
 ## CLI
 
@@ -158,9 +227,14 @@ Output is JSON to stdout, suitable for piping into other tools.
 
 ## Upgrading
 
-When upgrading from a version that used `~/.copilot/` or `~/.claude/` as the workspace, `memory-mcp setup` (or the MCP server on first start) will automatically copy your memory files to `~/.memory-mcp-workdir/`. Original files are preserved — remove them manually when ready.
+When upgrading from a version that used `~/.copilot/` or `~/.claude/` as the workspace, `memory-mcp setup` (or the MCP server on first start) will automatically copy your memory files to `~/.memory-mcp-workdir/default/`. Original files are preserved — remove them manually when ready.
 
-**Breaking change:** All `MEMORY_*` environment variables have been removed. Configuration is now managed entirely through the config file (`~/.memory-mcp-workdir/memory-mcp.json`). Use `memory-mcp config set <key> <value>` to migrate your settings.
+**Config migration:** If your config file uses the legacy flat format (no `profiles` section), it is automatically treated as the `default` profile. On the first operation that creates profiles (e.g. `config profile create`), legacy `workspace` and `dbPath` fields are migrated into `profiles.default` so custom paths are preserved.
+
+**Breaking changes:**
+
+- All `MEMORY_*` environment variables have been removed. Configuration is now managed entirely through the config file (`~/.memory-mcp-workdir/memory-mcp.json`). Use `memory-mcp config set <key> <value>` to migrate your settings.
+- The `--config` CLI flag has been removed. Use `--profile` to select a named profile instead.
 
 ## Uninstall
 

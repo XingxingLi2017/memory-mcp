@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 import {
   loadConfig, readConfigFile, saveConfigFile, deleteConfigFile,
   configFilePath, DEFAULTS, migrateFromLegacyDirs,
+  listProfiles, getDefaultProfile, createProfile, deleteProfile,
+  saveProfileConfig, setDefaultProfile, resetProfile,
+  DEFAULT_PROFILE, DEFAULT_WORKDIR, validateProfileName,
   type MemoryConfig, type MemoryConfigFile,
 } from "./config.js";
 
@@ -88,7 +91,8 @@ function getHomeDir(): string {
 
 function buildProfile(target: "copilot" | "claude"): TargetProfile {
   const home = getHomeDir();
-  const workspaceDir = DEFAULTS.workspace; // shared: ~/.memory-mcp-workdir
+  const config = loadConfig();
+  const workspaceDir = config.workspace; // resolved from default profile
   if (target === "claude") {
     const claudeDir = path.join(home, ".claude");
     return {
@@ -274,13 +278,74 @@ const CONFIG_KEYS: (keyof MemoryConfig)[] = [
 ];
 
 function handleConfig(args: string[]): void {
-  const sub = args[0];
+  // Extract --profile flag from args
+  let profileName: string | undefined;
+  const filteredArgs: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--profile" && args[i + 1]) {
+      profileName = args[++i];
+    } else {
+      filteredArgs.push(args[i]!);
+    }
+  }
+  const sub = filteredArgs[0];
+
+  // Profile management subcommands
+  if (sub === "profile") {
+    const action = filteredArgs[1];
+    if (!action || action === "list") {
+      const profiles = listProfiles();
+      const defaultP = getDefaultProfile();
+      for (const p of profiles) {
+        console.log(p === defaultP ? `  ${p} (default)` : `  ${p}`);
+      }
+      return;
+    }
+    if (action === "create") {
+      const name = filteredArgs[2];
+      if (!name) { console.error("Usage: memory-mcp config profile create <name>"); process.exit(1); }
+      if (createProfile(name)) {
+        console.log(`✓ Profile "${name}" created.`);
+      } else {
+        console.log(`  Profile "${name}" already exists.`);
+      }
+      return;
+    }
+    if (action === "delete") {
+      const name = filteredArgs[2];
+      if (!name) { console.error("Usage: memory-mcp config profile delete <name>"); process.exit(1); }
+      if (deleteProfile(name)) {
+        console.log(`✓ Profile "${name}" deleted.`);
+        const wsDir = path.join(DEFAULT_WORKDIR, name);
+        if (fs.existsSync(wsDir)) {
+          console.log(`  Note: Workspace directory retained at ${wsDir} — remove manually if no longer needed.`);
+        }
+      } else {
+        console.log(`  Profile "${name}" not found.`);
+      }
+      return;
+    }
+    if (action === "default") {
+      const name = filteredArgs[2];
+      if (!name) { console.error("Usage: memory-mcp config profile default <name>"); process.exit(1); }
+      if (setDefaultProfile(name)) {
+        console.log(`✓ Default profile set to "${name}".`);
+      } else {
+        console.error(`Profile "${name}" not found. Create it first: memory-mcp config profile create ${name}`);
+        process.exit(1);
+      }
+      return;
+    }
+    console.error("Usage: memory-mcp config profile [list|create|delete|default] [name]");
+    process.exit(1);
+  }
 
   if (!sub || sub === "show") {
-    // Show merged config
-    const merged = loadConfig();
+    const merged = loadConfig({ profile: profileName });
     const filePath = configFilePath();
-    console.log(`Config file: ${filePath}\n`);
+    const label = profileName ?? getDefaultProfile();
+    console.log(`Config file: ${filePath}`);
+    console.log(`Profile: ${label}\n`);
     console.log(JSON.stringify(merged, null, 2));
     return;
   }
@@ -291,21 +356,30 @@ function handleConfig(args: string[]): void {
   }
 
   if (sub === "reset") {
-    const filePath = configFilePath();
-    if (deleteConfigFile(filePath)) {
-      console.log(`✓ Config file deleted: ${filePath}`);
-      console.log("  All settings reset to defaults.");
+    if (profileName) {
+      // Reset profile config to empty (keeps the profile entry)
+      if (resetProfile(profileName)) {
+        console.log(`✓ Profile "${profileName}" reset to defaults.`);
+      } else {
+        console.log(`  Profile "${profileName}" not found.`);
+      }
     } else {
-      console.log("  No config file found — already using defaults.");
+      const filePath = configFilePath();
+      if (deleteConfigFile(filePath)) {
+        console.log(`✓ Config file deleted: ${filePath}`);
+        console.log("  All profiles and settings reset to defaults.");
+      } else {
+        console.log("  No config file found — already using defaults.");
+      }
     }
     return;
   }
 
   if (sub === "set") {
-    const key = args[1] as keyof MemoryConfig | undefined;
-    const value = args[2];
+    const key = filteredArgs[1] as keyof MemoryConfig | undefined;
+    const value = filteredArgs[2];
     if (!key || value === undefined) {
-      console.error("Usage: memory-mcp config set <key> <value>");
+      console.error("Usage: memory-mcp config [--profile <name>] set <key> <value>");
       console.error(`Valid keys: ${CONFIG_KEYS.join(", ")}`);
       process.exit(1);
     }
@@ -315,16 +389,14 @@ function handleConfig(args: string[]): void {
       process.exit(1);
     }
 
-    // Read existing file config (not merged)
-    const filePath = configFilePath();
-    const existing = readConfigFile(filePath);
+    // Build the partial config to save
+    const partial: MemoryConfigFile = {};
 
     // Parse and validate value
     if (key === "extraDirs") {
-      existing.extraDirs = value
+      partial.extraDirs = value
         .split(",").map((d) => d.trim()).filter(Boolean).map((d) => path.resolve(d));
     } else if (key === "sessionDirs") {
-      // JSON input: '[{"dir":"/path","kind":"copilot"}]'
       try {
         const parsed = JSON.parse(value);
         if (!Array.isArray(parsed)) throw new Error("must be an array");
@@ -333,7 +405,7 @@ function handleConfig(args: string[]): void {
             throw new Error(`each entry needs {dir, kind: "copilot"|"claude"}`);
           }
         }
-        existing.sessionDirs = parsed;
+        partial.sessionDirs = parsed;
       } catch (err) {
         console.error(`sessionDirs must be valid JSON array, e.g. '[{"dir":"/path","kind":"copilot"}]'`);
         console.error(`Error: ${err instanceof Error ? err.message : err}`);
@@ -345,7 +417,6 @@ function handleConfig(args: string[]): void {
         console.error(`${key} must be a number, got "${value}"`);
         process.exit(1);
       }
-      // Range validation
       const ranges: Record<string, [number, number]> = {
         chunkSize: [64, 4096],
         tokenMax: [100, 16384],
@@ -357,20 +428,21 @@ function handleConfig(args: string[]): void {
         console.error(`${key} must be between ${min} and ${max === Infinity ? "∞" : max}, got ${n}`);
         process.exit(1);
       }
-      existing[key] = n;
+      partial[key] = n;
     } else {
-      // string fields: workspace, dbPath, model
-      (existing as Record<string, unknown>)[key] = value;
+      (partial as Record<string, unknown>)[key] = value;
     }
 
-    saveConfigFile(existing, filePath);
-    console.log(`✓ ${key} = ${JSON.stringify(existing[key])}`);
-    console.log(`  Saved to ${filePath}`);
+    // Save to the specified profile, or the default profile if not specified
+    const targetProfile = profileName ?? getDefaultProfile();
+    saveProfileConfig(targetProfile, partial);
+    console.log(`✓ [${targetProfile}] ${key} = ${JSON.stringify(partial[key])}`);
+    console.log(`  Saved to ${configFilePath()}`);
     return;
   }
 
   console.error(`Unknown config subcommand: ${sub}`);
-  console.error("Usage: memory-mcp config [show|set|reset|path]");
+  console.error("Usage: memory-mcp config [show|set|reset|path|profile]");
   process.exit(1);
 }
 
@@ -388,17 +460,22 @@ function main() {
     console.log(`memory-mcp — Local memory management for AI coding assistants
 
 Usage:
-  memory-mcp setup [--claude]       Configure MCP server for Copilot CLI (or Claude Code)
-  memory-mcp uninstall [--claude]   Remove memory MCP configuration
-  memory-mcp config [show]          Show current merged configuration
-  memory-mcp config set <key> <val> Set a config value
-  memory-mcp config reset           Reset config to defaults
-  memory-mcp config path            Show config file path
+  memory-mcp setup [--claude]                  Configure MCP server
+  memory-mcp uninstall [--claude]              Remove memory MCP configuration
+  memory-mcp config [--profile <name>] [show]  Show config (optionally for a profile)
+  memory-mcp config [--profile <name>] set <key> <val>  Set a config value
+  memory-mcp config [--profile <name>] reset   Reset config/profile
+  memory-mcp config path                       Show config file path
+  memory-mcp config profile list               List all profiles
+  memory-mcp config profile create <name>      Create a new profile
+  memory-mcp config profile delete <name>      Delete a profile
+  memory-mcp config profile default <name>     Set the default profile
 
 Options:
   --claude    Target Claude Code CLI instead of GitHub Copilot CLI
 
-The MCP server itself is started automatically by the host CLI.`);
+The MCP server itself is started automatically by the host CLI.
+Use --profile <name> with the server: node dist/server.js --profile <name>`);
     process.exit(0);
   }
 
@@ -422,6 +499,13 @@ The MCP server itself is started automatically by the host CLI.`);
 
   // --- setup ---
   console.log(`Setting up memory-mcp for ${profile.name}...\n`);
+
+  // Initialize config file with default profile if it doesn't exist
+  const cfgPath = configFilePath();
+  if (!fs.existsSync(cfgPath)) {
+    createProfile(DEFAULT_PROFILE);
+    console.log(`✓ Created config with "${DEFAULT_PROFILE}" profile at ${cfgPath}`);
+  }
 
   // Migrate from legacy dirs if this is a fresh workspace
   migrateFromLegacyDirs(profile.workspaceDir);
