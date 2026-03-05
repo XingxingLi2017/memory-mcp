@@ -123,7 +123,7 @@ Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$H
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `workspace` | `~/.memory-mcp-workdir` | Root directory for memory files and database |
+| `workspace` | `~/.memory-mcp-workdir/<profile>` | Root directory for memory files and database |
 | `dbPath` | `<workspace>/memory.db` | Path to SQLite database |
 | `chunkSize` | `512` | Chunk size in tokens for markdown splitting (64–4096). Changing triggers automatic index rebuild |
 | `tokenMax` | `4096` | Default max tokens per search response (100–16384). Controls snippet length and result count |
@@ -132,6 +132,36 @@ Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$H
 | `sessionDirs` | `[copilot, claude]` | Session transcript sources. Default: `~/.copilot/session-state` (copilot) + `~/.claude/projects` (claude). Set to override entirely. JSON format: `[{"dir":"/path","kind":"copilot"}]` |
 | `extraDirs` | `[]` | Extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
 | `model` | `hf:ggml-org/embeddinggemma-300M-GGUF/...` | Embedding model. Accepts a HuggingFace URI (`hf:org/repo/file.gguf`) for auto-download, or a local file path (`/path/to/model.gguf`) |
+
+### Profiles
+
+Profiles let you maintain isolated memory spaces for different use cases (e.g. coding vs learning). Each profile has its own workspace, database, and memory files.
+
+```bash
+# Create profiles
+memory-mcp config profile create coding
+memory-mcp config profile create learning
+
+# Configure each profile independently
+memory-mcp config --profile coding set sessionDirs '[{"dir":"~/.copilot/session-state","kind":"copilot"},{"dir":"~/.claude/projects","kind":"claude"}]'
+memory-mcp config --profile learning set extraDirs /path/to/obsidian-vault
+memory-mcp config --profile learning set sessionDirs '[]'
+
+# Set which profile is used by default (e.g. by the MCP server)
+memory-mcp config profile default coding
+
+# List profiles
+memory-mcp config profile list
+
+# Use a specific profile with the CLI
+memory-mcp-cli search "query" --profile learning
+
+# Use a specific profile with the MCP server
+# In your MCP host config (e.g. .claude.json):
+#   "args": ["dist/server.js", "--profile", "coding"]
+```
+
+Each profile workspace lives at `~/.memory-mcp-workdir/<profile-name>/` by default.
 
 ## CLI
 

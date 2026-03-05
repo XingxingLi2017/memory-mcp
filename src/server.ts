@@ -11,7 +11,13 @@ import { searchMemory } from "./search.js";
 import { MEMORY_EXTENSIONS, hashText, buildExtraDirAliases } from "./internal.js";
 import { loadConfig, resolvedExtraDirs, migrateFromLegacyDirs } from "./config.js";
 
-const config = loadConfig();
+// Parse --profile from process.argv (before MCP takes over stdio)
+const serverProfile = (() => {
+  const idx = process.argv.indexOf("--profile");
+  return idx >= 0 && process.argv[idx + 1] ? process.argv[idx + 1] : undefined;
+})();
+
+const config = loadConfig({ profile: serverProfile });
 
 // Auto-migrate from legacy dirs on first server start (non-fatal)
 try {

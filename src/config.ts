@@ -33,6 +33,14 @@ export interface MemoryConfig {
 /** Partial config as stored in the JSON file (all fields optional). */
 export type MemoryConfigFile = Partial<MemoryConfig>;
 
+/** Config file structure with multi-profile support. */
+export type ConfigFileData = MemoryConfigFile & {
+  defaultProfile?: string;
+  profiles?: Record<string, MemoryConfigFile>;
+};
+
+export const DEFAULT_PROFILE = "default";
+
 // ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
@@ -72,13 +80,13 @@ export function configFilePath(): string {
 }
 
 /** Read the config file. Returns {} if missing or invalid. */
-export function readConfigFile(filePath?: string): MemoryConfigFile {
+export function readConfigFile(filePath?: string): ConfigFileData {
   const p = filePath ?? configFilePath();
   try {
     const raw = fs.readFileSync(p, "utf-8");
     const parsed = JSON.parse(raw);
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      return parsed as MemoryConfigFile;
+      return parsed as ConfigFileData;
     }
   } catch {
     // missing or invalid — fine
@@ -86,14 +94,14 @@ export function readConfigFile(filePath?: string): MemoryConfigFile {
   return {};
 }
 
-/** Save partial config to the file (only non-default values). */
-export function saveConfigFile(partial: MemoryConfigFile, filePath?: string): void {
+/** Save config data to the file. */
+export function saveConfigFile(data: ConfigFileData, filePath?: string): void {
   const p = filePath ?? configFilePath();
   const dir = path.dirname(p);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(p, JSON.stringify(partial, null, 2) + "\n", "utf-8");
+  fs.writeFileSync(p, JSON.stringify(data, null, 2) + "\n", "utf-8");
 }
 
 /** Delete the config file (reset to defaults). Returns true if deleted. */
@@ -119,13 +127,31 @@ function clamp(val: number | undefined, min: number, max: number, fallback: numb
 }
 
 /**
- * Load and merge configuration.
- * Priority: overrides > config file > defaults.
+ * Load and merge configuration for a specific profile.
+ * Priority: overrides > profile config > top-level config > defaults.
  * Numeric fields are clamped to valid ranges (guards against hand-edited JSON).
+ *
+ * If the config file uses the legacy flat format (no profiles section),
+ * it's treated as a single "default" profile for backward compatibility.
  */
-export function loadConfig(overrides?: MemoryConfigFile, configPath?: string): MemoryConfig {
-  const file = readConfigFile(configPath);
-  const workspace = overrides?.workspace ?? file.workspace ?? DEFAULTS.workspace;
+export function loadConfig(
+  opts?: { profile?: string; overrides?: MemoryConfigFile; configPath?: string },
+): MemoryConfig {
+  const fileData = readConfigFile(opts?.configPath);
+
+  // Determine which profile to use
+  const profileName = opts?.profile ?? fileData.defaultProfile ?? DEFAULT_PROFILE;
+
+  // Merge: profile-specific fields over top-level fields
+  const profileData = fileData.profiles?.[profileName] ?? {};
+
+  // Top-level fields (legacy flat format or shared defaults)
+  const { profiles: _, defaultProfile: __, ...topLevel } = fileData;
+  const file: MemoryConfigFile = { ...topLevel, ...profileData };
+
+  const overrides = opts?.overrides;
+  const workspace = overrides?.workspace ?? file.workspace
+    ?? path.join(DEFAULT_WORKDIR, profileName);
 
   return {
     workspace,
@@ -138,6 +164,71 @@ export function loadConfig(overrides?: MemoryConfigFile, configPath?: string): M
     extraDirs: overrides?.extraDirs ?? file.extraDirs ?? DEFAULTS.extraDirs,
     model: overrides?.model ?? file.model ?? DEFAULTS.model,
   };
+}
+
+/** List all profile names from the config file. Always includes the default profile. */
+export function listProfiles(configPath?: string): string[] {
+  const fileData = readConfigFile(configPath);
+  const defaultP = fileData.defaultProfile ?? DEFAULT_PROFILE;
+  if (fileData.profiles) {
+    const names = new Set(Object.keys(fileData.profiles));
+    names.add(defaultP);
+    return Array.from(names);
+  }
+  return [defaultP];
+}
+
+/** Get the default profile name. */
+export function getDefaultProfile(configPath?: string): string {
+  const fileData = readConfigFile(configPath);
+  return fileData.defaultProfile ?? DEFAULT_PROFILE;
+}
+
+/** Save config for a specific profile. */
+export function saveProfileConfig(
+  profileName: string,
+  partial: MemoryConfigFile,
+  configPath?: string,
+): void {
+  const filePath = configPath ?? configFilePath();
+  const fileData = readConfigFile(filePath);
+  if (!fileData.profiles) fileData.profiles = {};
+  fileData.profiles[profileName] = { ...(fileData.profiles[profileName] ?? {}), ...partial };
+  saveConfigFile(fileData, filePath);
+}
+
+/** Create a new profile (empty config). Returns false if already exists. */
+export function createProfile(profileName: string, configPath?: string): boolean {
+  const filePath = configPath ?? configFilePath();
+  const fileData = readConfigFile(filePath);
+  if (!fileData.profiles) fileData.profiles = {};
+  if (fileData.profiles[profileName]) return false;
+  fileData.profiles[profileName] = {};
+  if (!fileData.defaultProfile) fileData.defaultProfile = profileName;
+  saveConfigFile(fileData, filePath);
+  return true;
+}
+
+/** Delete a profile. Returns false if not found. */
+export function deleteProfile(profileName: string, configPath?: string): boolean {
+  const filePath = configPath ?? configFilePath();
+  const fileData = readConfigFile(filePath);
+  if (!fileData.profiles?.[profileName]) return false;
+  delete fileData.profiles[profileName];
+  if (fileData.defaultProfile === profileName) {
+    const remaining = Object.keys(fileData.profiles);
+    fileData.defaultProfile = remaining[0] ?? DEFAULT_PROFILE;
+  }
+  saveConfigFile(fileData, filePath);
+  return true;
+}
+
+/** Set the default profile. */
+export function setDefaultProfile(profileName: string, configPath?: string): void {
+  const filePath = configPath ?? configFilePath();
+  const fileData = readConfigFile(filePath);
+  fileData.defaultProfile = profileName;
+  saveConfigFile(fileData, filePath);
 }
 
 /**
