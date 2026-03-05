@@ -101,16 +101,25 @@ The host CLI will automatically search these files before answering questions ab
 All settings have sensible defaults and work out of the box. To customize, use the config command:
 
 ```bash
-# Show current config
+# Show current config (uses default profile)
 memory-mcp config
 
-# Set a value
+# Show config for a specific profile
+memory-mcp config --profile learning show
+
+# Set a value (on default profile)
 memory-mcp config set chunkSize 1024
 memory-mcp config set extraDirs /data/obsidian-vault,/data/notes
 memory-mcp config set model /path/to/local-model.gguf
 
-# Reset to defaults
+# Set a value on a specific profile
+memory-mcp config --profile learning set chunkSize 256
+
+# Reset to defaults (all profiles and settings)
 memory-mcp config reset
+
+# Reset a single profile to defaults (keeps the profile entry)
+memory-mcp config --profile learning reset
 
 # Show config file path
 memory-mcp config path
@@ -191,7 +200,7 @@ memory-mcp-cli search "query" --profile learning
 #   "env": { "MEMORY_MCP_PROFILE": "coding" }
 ```
 
-Each profile workspace lives at `~/.memory-mcp-workdir/<profile-name>/` by default.
+Each profile workspace lives at `~/.memory-mcp-workdir/<profile-name>/` by default. Deleting a profile removes its config entry but **retains the workspace directory** on disk — remove it manually if no longer needed.
 
 ## CLI
 
@@ -218,9 +227,14 @@ Output is JSON to stdout, suitable for piping into other tools.
 
 ## Upgrading
 
-When upgrading from a version that used `~/.copilot/` or `~/.claude/` as the workspace, `memory-mcp setup` (or the MCP server on first start) will automatically copy your memory files to `~/.memory-mcp-workdir/`. Original files are preserved — remove them manually when ready.
+When upgrading from a version that used `~/.copilot/` or `~/.claude/` as the workspace, `memory-mcp setup` (or the MCP server on first start) will automatically copy your memory files to `~/.memory-mcp-workdir/default/`. Original files are preserved — remove them manually when ready.
 
-**Breaking change:** All `MEMORY_*` environment variables have been removed. Configuration is now managed entirely through the config file (`~/.memory-mcp-workdir/memory-mcp.json`). Use `memory-mcp config set <key> <value>` to migrate your settings.
+**Config migration:** If your config file uses the legacy flat format (no `profiles` section), it is automatically treated as the `default` profile. On the first operation that creates profiles (e.g. `config profile create`), legacy `workspace` and `dbPath` fields are migrated into `profiles.default` so custom paths are preserved.
+
+**Breaking changes:**
+
+- All `MEMORY_*` environment variables have been removed. Configuration is now managed entirely through the config file (`~/.memory-mcp-workdir/memory-mcp.json`). Use `memory-mcp config set <key> <value>` to migrate your settings.
+- The `--config` CLI flag has been removed. Use `--profile` to select a named profile instead.
 
 ## Uninstall
 
