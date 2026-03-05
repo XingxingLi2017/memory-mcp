@@ -202,12 +202,17 @@ export function getDefaultProfile(configPath?: string): string {
   return fileData.defaultProfile ?? DEFAULT_PROFILE;
 }
 
-/** Ensure fileData has a profiles section. Migrates legacy workspace if needed. */
+/** Ensure fileData has a profiles section. Migrates legacy flat fields if needed. */
 function ensureProfilesSection(fileData: ConfigFileData): void {
-  if (!fileData.profiles && fileData.workspace) {
-    fileData.profiles = { [DEFAULT_PROFILE]: { workspace: fileData.workspace } };
+  if (!fileData.profiles) {
+    // Migrate all profile-scoped legacy fields into profiles.default
+    const legacy: MemoryConfigFile = {};
+    if (fileData.workspace) legacy.workspace = fileData.workspace;
+    if (fileData.dbPath) legacy.dbPath = fileData.dbPath;
+    fileData.profiles = Object.keys(legacy).length > 0
+      ? { [DEFAULT_PROFILE]: legacy }
+      : {};
   }
-  if (!fileData.profiles) fileData.profiles = {};
 }
 
 /** Save config for a specific profile. */
