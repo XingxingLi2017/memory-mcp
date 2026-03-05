@@ -94,6 +94,10 @@ function extractGlobalOverrides(opts: Record<string, string>): {
   const rest: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(opts)) {
+    if (key === "config") {
+      console.error("[memory-mcp] Warning: --config flag is no longer supported. Use --profile instead.");
+      continue;
+    }
     if (!GLOBAL_FLAGS.has(key)) {
       rest[key] = value;
       continue;
