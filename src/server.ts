@@ -46,6 +46,7 @@ const dbPath = config.dbPath;
 let db: import("better-sqlite3").Database;
 let lastSyncAt = 0;
 let lastSessionSyncAt = 0;
+let embeddingSyncInProgress = false;
 const SYNC_COOLDOWN_MS = 5_000;
 const SESSION_SYNC_COOLDOWN_MS = 60_000;
 
@@ -72,10 +73,13 @@ async function ensureSynced(): Promise<void> {
       });
       lastSessionSyncAt = Date.now();
     }
-    // Async embedding sync — don't block on it
-    syncEmbeddings(db).catch((err) =>
-      console.error("[memory-mcp] embedding sync error:", err),
-    );
+    // Async embedding sync — don't block, skip if already running
+    if (!embeddingSyncInProgress) {
+      embeddingSyncInProgress = true;
+      syncEmbeddings(db)
+        .catch((err) => console.error("[memory-mcp] embedding sync error:", err))
+        .finally(() => { embeddingSyncInProgress = false; });
+    }
   } catch (err) {
     console.error("memory sync error:", err);
   }

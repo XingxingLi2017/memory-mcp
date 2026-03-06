@@ -154,8 +154,9 @@ async function main(): Promise<void> {
       maxCount: config.sessionMax,
       sessionDirs: config.sessionDirs,
     });
-    // Best-effort embedding sync
-    try { await syncEmbeddings(db); } catch {}
+    // Fire off embedding sync (non-blocking — search proceeds immediately)
+    // Cross-process lock in syncEmbeddings ensures only one process embeds at a time.
+    const embeddingDone = syncEmbeddings(db).catch(() => {});
 
     if (command === "search") {
       if (!query) {
@@ -195,6 +196,9 @@ async function main(): Promise<void> {
     } else {
       throw new Error(`Unknown command: ${command}`);
     }
+
+    // Wait for embedding to finish before closing DB
+    await embeddingDone;
   } finally {
     db.close();
   }
