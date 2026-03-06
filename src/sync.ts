@@ -150,13 +150,16 @@ function indexFile(
       )
     : null;
 
-  const insertVec = db.prepare(`INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?, ?)`);
+  const insertVec = isVecAvailable(db)
+    ? db.prepare(`INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?, ?)`)
+    : null;
   const findCache = db.prepare(`SELECT embedding FROM embedding_cache WHERE hash = ?`);
 
   const transaction = db.transaction(() => {
     for (const chunk of chunkData) {
       insertChunk.run(chunk.id, entry.path, source, chunk.startLine, chunk.endLine, chunk.hash, chunk.text, now);
       insertFts?.run(segmentText(chunk.text), chunk.id, entry.path, source, chunk.startLine, chunk.endLine);
+      if (!insertVec) continue;
       // Re-insert embedding: prefer salvaged vec, fallback to embedding_cache
       const savedVec = oldVecs.get(chunk.hash);
       if (savedVec) {
