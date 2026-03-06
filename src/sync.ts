@@ -256,7 +256,7 @@ export async function syncSessionFiles(
  * Uses BEGIN IMMEDIATE for atomic acquisition and PID liveness check.
  * Steals lock from dead processes or alive-but-stuck processes (>2h).
  */
-const MAX_LOCK_AGE_MS = 2 * 60 * 60 * 1000; // 2 hours — generous for weak machines
+const MAX_LOCK_AGE_MS = 1 * 60 * 60 * 1000; // 1 hour — generous for weak machines
 
 function tryAcquireEmbeddingLock(db: Database.Database): boolean {
   try {
