@@ -105,10 +105,21 @@ function indexFile(
   const filtered = chunks.filter((c) => c.text.trim().length > 0);
   const now = Date.now();
 
-  // Clear old data for this file (including vectors)
+  // Salvage existing embeddings before clearing (keyed by content hash)
+  const oldVecs = new Map<string, Buffer>();
   const oldChunkIds = db
     .prepare(`SELECT id FROM chunks WHERE path = ? AND source = ?`)
     .all(entry.path, source) as Array<{ id: string }>;
+  try {
+    for (const { id } of oldChunkIds) {
+      const row = db.prepare(
+        `SELECT c.hash, v.embedding FROM chunks c JOIN chunks_vec v ON v.id = c.id WHERE c.id = ?`,
+      ).get(id) as { hash: string; embedding: Buffer } | undefined;
+      if (row) oldVecs.set(row.hash, row.embedding);
+    }
+  } catch {}
+
+  // Clear old data for this file (including vectors)
   try {
     for (const { id } of oldChunkIds) {
       db.prepare(`DELETE FROM chunks_vec WHERE id = ?`).run(id);
@@ -139,10 +150,26 @@ function indexFile(
       )
     : null;
 
+  const insertVec = isVecAvailable(db)
+    ? db.prepare(`INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?, ?)`)
+    : null;
+  const findCache = db.prepare(`SELECT embedding FROM embedding_cache WHERE hash = ?`);
+
   const transaction = db.transaction(() => {
     for (const chunk of chunkData) {
       insertChunk.run(chunk.id, entry.path, source, chunk.startLine, chunk.endLine, chunk.hash, chunk.text, now);
       insertFts?.run(segmentText(chunk.text), chunk.id, entry.path, source, chunk.startLine, chunk.endLine);
+      if (!insertVec) continue;
+      // Re-insert embedding: prefer salvaged vec, fallback to embedding_cache
+      const savedVec = oldVecs.get(chunk.hash);
+      if (savedVec) {
+        try { insertVec.run(chunk.id, savedVec); } catch {}
+      } else {
+        const cached = findCache.get(chunk.hash) as { embedding: Buffer } | undefined;
+        if (cached) {
+          try { insertVec.run(chunk.id, cached.embedding); } catch {}
+        }
+      }
     }
 
     // Upsert file record
@@ -225,87 +252,166 @@ export async function syncSessionFiles(
 }
 
 /**
+ * Cross-process embedding lock using the meta table.
+ * Uses BEGIN IMMEDIATE for atomic acquisition and PID liveness check.
+ * Steals lock from dead processes or alive-but-stuck processes (>2h).
+ */
+const MAX_LOCK_AGE_MS = 1 * 60 * 60 * 1000; // 1 hour — generous for weak machines
+
+function tryAcquireEmbeddingLock(db: Database.Database): boolean {
+  try {
+    // BEGIN IMMEDIATE acquires a write lock immediately, preventing races
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = db.prepare(`SELECT value FROM meta WHERE key = 'embedding_lock'`).get() as
+        | { value: string }
+        | undefined;
+      if (row) {
+        const lock = JSON.parse(row.value) as { pid: number; startedAt: number };
+        if (isPidAlive(lock.pid) && Date.now() - lock.startedAt < MAX_LOCK_AGE_MS) {
+          db.exec("ROLLBACK");
+          return false;
+        }
+        // Lock holder is dead or stuck too long — steal it
+      }
+      db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('embedding_lock', ?)`).run(
+        JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
+      );
+      db.exec("COMMIT");
+      return true;
+    } catch {
+      db.exec("ROLLBACK");
+      return false;
+    }
+  } catch {
+    return false;
+  }
+}
+
+/** Check if a PID is alive. Distinguishes ESRCH (dead) from EPERM (alive). */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: unknown) {
+    // EPERM = process exists but we lack permission → alive
+    if (err && typeof err === "object" && "code" in err && err.code === "EPERM") return true;
+    return false; // ESRCH = no such process → dead
+  }
+}
+
+function releaseEmbeddingLock(db: Database.Database): void {
+  try {
+    const row = db.prepare(`SELECT value FROM meta WHERE key = 'embedding_lock'`).get() as
+      | { value: string }
+      | undefined;
+    if (row) {
+      const lock = JSON.parse(row.value) as { pid: number };
+      if (lock.pid === process.pid) {
+        db.prepare(`DELETE FROM meta WHERE key = 'embedding_lock'`).run();
+      }
+    }
+  } catch {}
+}
+
+/**
  * Compute and store embeddings for chunks that don't have them yet.
- * Runs after the main sync to avoid blocking startup.
+ * Uses a cross-process PID lock so only one process embeds at a time.
  */
 export async function syncEmbeddings(db: Database.Database): Promise<number> {
   const vecOk = isVecAvailable(db);
   if (!vecOk) return 0;
 
-  let totalEmbedded = 0;
-  const findMissing = db.prepare(
-    `SELECT c.id, c.hash, c.text FROM chunks c
-     WHERE NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.id = c.id)
-     LIMIT 100`,
-  );
-  const findCache = db.prepare(`SELECT embedding FROM embedding_cache WHERE hash = ?`);
-  const insertVec = db.prepare(`INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?, ?)`);
-  const insertCache = db.prepare(
-    `INSERT OR REPLACE INTO embedding_cache (hash, embedding, updated_at) VALUES (?, ?, ?)`,
-  );
+  if (!tryAcquireEmbeddingLock(db)) return 0;
 
-  while (true) {
-    const missing = findMissing.all() as Array<{ id: string; hash: string; text: string }>;
-    if (missing.length === 0) break;
-
-    // Check embedding cache for already-computed hashes
-    const cached = new Map<string, Buffer>();
-    const uncached: Array<{ index: number; id: string; hash: string; text: string }> = [];
-
-    for (let i = 0; i < missing.length; i++) {
-      const row = missing[i]!;
-      const hit = findCache.get(row.hash) as { embedding: Buffer } | undefined;
-      if (hit) {
-        cached.set(row.id, hit.embedding);
-      } else {
-        uncached.push({ index: i, ...row });
-      }
-    }
-
-    // Embed uncached texts in batch
-    let newEmbeddings: number[][] = [];
-    let embedFailed = false;
-    if (uncached.length > 0) {
-      try {
-        newEmbeddings = await embedBatch(uncached.map((u) => u.text));
-      } catch (err) {
-        console.error("[memory-mcp] embedding failed:", err);
-        embedFailed = true;
-      }
-    }
-
-    // Store all embeddings (including cached hits even if embed failed)
-    const now = Date.now();
-    const tx = db.transaction(() => {
-      for (const [id, buf] of cached) {
-        insertVec.run(id, buf);
-      }
-      for (let i = 0; i < uncached.length; i++) {
-        const item = uncached[i]!;
-        const vec = newEmbeddings[i];
-        if (!vec || vec.length === 0) continue;
-        const buf = vectorToBuffer(vec);
-        insertVec.run(item.id, buf);
-        insertCache.run(item.hash, buf, now);
-      }
-    });
-    tx();
-
-    totalEmbedded += cached.size + newEmbeddings.length;
-
-    if (embedFailed) {
-      const remaining = (db.prepare(
-        `SELECT COUNT(*) as c FROM chunks c WHERE NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.id = c.id)`,
-      ).get() as { c: number }).c;
-      console.error(`[memory-mcp] embedding stopped early; ${remaining} chunk(s) still need embedding`);
-      break;
-    }
-  }
-
-  // Clean stale embedding cache entries
   try {
-    db.prepare(`DELETE FROM embedding_cache WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chunks.hash = embedding_cache.hash)`).run();
-  } catch {}
+    const totalChunks = (db.prepare(`SELECT COUNT(*) as c FROM chunks`).get() as { c: number }).c;
+    let totalEmbedded = 0;
+    let batchCount = 0;
+    const findMissing = db.prepare(
+      `SELECT c.id, c.hash, c.text FROM chunks c
+       WHERE NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.id = c.id)
+       LIMIT 100`,
+    );
+    const findCache = db.prepare(`SELECT embedding FROM embedding_cache WHERE hash = ?`);
+    const insertVec = db.prepare(`INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?, ?)`);
+    const insertCache = db.prepare(
+      `INSERT OR REPLACE INTO embedding_cache (hash, embedding, updated_at) VALUES (?, ?, ?)`,
+    );
 
-  return totalEmbedded;
+    while (true) {
+      const missing = findMissing.all() as Array<{ id: string; hash: string; text: string }>;
+      if (missing.length === 0) break;
+
+      // Check embedding cache for already-computed hashes
+      const cached = new Map<string, Buffer>();
+      const uncached: Array<{ index: number; id: string; hash: string; text: string }> = [];
+
+      for (let i = 0; i < missing.length; i++) {
+        const row = missing[i]!;
+        const hit = findCache.get(row.hash) as { embedding: Buffer } | undefined;
+        if (hit) {
+          cached.set(row.id, hit.embedding);
+        } else {
+          uncached.push({ index: i, ...row });
+        }
+      }
+
+      // Embed uncached texts in batch
+      let newEmbeddings: number[][] = [];
+      let embedFailed = false;
+      if (uncached.length > 0) {
+        try {
+          newEmbeddings = await embedBatch(uncached.map((u) => u.text));
+        } catch (err) {
+          console.error("[memory-mcp] embedding failed:", err);
+          embedFailed = true;
+        }
+      }
+
+      // Store all embeddings (including cached hits even if embed failed)
+      const now = Date.now();
+      const tx = db.transaction(() => {
+        for (const [id, buf] of cached) {
+          insertVec.run(id, buf);
+        }
+        for (let i = 0; i < uncached.length; i++) {
+          const item = uncached[i]!;
+          const vec = newEmbeddings[i];
+          if (!vec || vec.length === 0) continue;
+          const buf = vectorToBuffer(vec);
+          insertVec.run(item.id, buf);
+          insertCache.run(item.hash, buf, now);
+        }
+      });
+      tx();
+
+      totalEmbedded += cached.size + newEmbeddings.length;
+      batchCount++;
+
+      // Progress logging — throttle to every 5th batch to reduce COUNT(*) overhead
+      if (totalChunks > 0 && batchCount % 5 === 0) {
+        const done = (db.prepare(`SELECT COUNT(*) as c FROM chunks_vec`).get() as { c: number }).c;
+        const pct = ((done / totalChunks) * 100).toFixed(1);
+        console.error(`[memory-mcp] embedding progress: ${done}/${totalChunks} (${pct}%)`);
+      }
+
+      if (embedFailed) {
+        const remaining = (db.prepare(
+          `SELECT COUNT(*) as c FROM chunks c WHERE NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.id = c.id)`,
+        ).get() as { c: number }).c;
+        console.error(`[memory-mcp] embedding stopped early; ${remaining} chunk(s) still need embedding`);
+        break;
+      }
+    }
+
+    // Clean stale embedding cache entries
+    try {
+      db.prepare(`DELETE FROM embedding_cache WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chunks.hash = embedding_cache.hash)`).run();
+    } catch {}
+
+    return totalEmbedded;
+  } finally {
+    releaseEmbeddingLock(db);
+  }
 }

@@ -90,13 +90,16 @@ export async function searchMemory(
   const ftsOk = isFtsAvailable(db);
   let vecOk = isVecAvailable(db);
 
-  // Skip vector search if embedding coverage is too low (still syncing)
+  // Use vector search whenever any embeddings exist (progressive — no hard threshold)
+  let embeddingCoverage = 0;
   if (vecOk) {
     try {
       const total = (db.prepare(`SELECT COUNT(*) as c FROM chunks`).get() as { c: number }).c;
       const embedded = (db.prepare(`SELECT COUNT(*) as c FROM chunks_vec`).get() as { c: number }).c;
-      if (total > 0 && embedded / total < 0.8) {
+      if (embedded === 0) {
         vecOk = false;
+      } else if (total > 0) {
+        embeddingCoverage = embedded / total;
       }
     } catch {}
   }
@@ -174,7 +177,10 @@ export async function searchMemory(
   // Hybrid merge or single-source
   let results: SearchResult[];
   if (ftsResults.length > 0 && vecResults.length > 0) {
-    results = mergeHybrid(ftsResults, vecResults, 0.5, 0.5);
+    // Dynamic weight: scale vector contribution by embedding coverage
+    const vecWeight = Math.min(0.5, embeddingCoverage);
+    const ftsWeight = 1 - vecWeight;
+    results = mergeHybrid(ftsResults, vecResults, ftsWeight, vecWeight);
   } else if (vecResults.length > 0) {
     results = vecResults;
   } else if (ftsResults.length > 0) {
