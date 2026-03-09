@@ -145,7 +145,7 @@ async function main(): Promise<void> {
   const db = await openDatabase(dbPath, { chunkSize: config.chunkSize });
 
   try {
-    // Sync before search
+    // Sync files before search/status
     const extraDirs = resolvedExtraDirs(config);
     await syncMemoryFiles(db, workspaceDir, { chunkSize: config.chunkSize, extraDirs });
     await syncSessionFiles(db, {
@@ -154,14 +154,14 @@ async function main(): Promise<void> {
       maxCount: config.sessionMax,
       sessionDirs: config.sessionDirs,
     });
-    // Fire off embedding sync (non-blocking — search proceeds immediately)
-    // Cross-process lock in syncEmbeddings ensures only one process embeds at a time.
-    const embeddingDone = syncEmbeddings(db).catch(() => {});
 
     if (command === "search") {
       if (!query) {
         throw new Error("search requires a query argument");
       }
+      // Embedding sync improves vector search quality — await before search
+      const embeddingDone = syncEmbeddings(db).catch(() => {});
+      await embeddingDone;
       const maxResults = parseNonNegativeInt(rest["max-results"], "max-results") ?? 10;
       const minScore = parsePositiveFloat(rest["min-score"], "min-score");
       const tokenMax = parseNonNegativeInt(rest["token-max"], "token-max") ?? config.tokenMax;
@@ -196,9 +196,6 @@ async function main(): Promise<void> {
     } else {
       throw new Error(`Unknown command: ${command}`);
     }
-
-    // Wait for embedding to finish before closing DB
-    await embeddingDone;
   } finally {
     db.close();
   }

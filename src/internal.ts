@@ -58,12 +58,16 @@ function extOf(name: string): string {
   return i === -1 ? "" : name.slice(i).toLowerCase();
 }
 
-export type MemoryFileEntry = {
+/** Lightweight stat-only file info for fast change detection. */
+export type FileStatEntry = {
   /** Relative path from workspace root */
   path: string;
   absPath: string;
   mtimeMs: number;
   size: number;
+};
+
+export type MemoryFileEntry = FileStatEntry & {
   hash: string;
   /** File content (cached from initial read) */
   content: string;
@@ -154,6 +158,29 @@ async function walkDir(dir: string, files: string[], skippedSymlinks?: string[])
       files.push(full);
     }
   }
+}
+
+/**
+ * Lightweight stat-only entry — no file read, no hash.
+ * Used for fast mtime+size change detection against the DB.
+ */
+export async function statFileEntry(
+  absPath: string,
+  workspaceDir: string,
+  extraDirAliases?: Map<string, string>,
+): Promise<FileStatEntry> {
+  const stat = await fs.stat(absPath);
+  let relPath = path.relative(workspaceDir, absPath).replace(/\\/g, "/");
+  if (extraDirAliases && relPath.startsWith("..")) {
+    for (const [dir, alias] of extraDirAliases) {
+      const rel = path.relative(dir, absPath).replace(/\\/g, "/");
+      if (!rel.startsWith("..")) {
+        relPath = `extra:${alias}/${rel}`;
+        break;
+      }
+    }
+  }
+  return { path: relPath, absPath, mtimeMs: stat.mtimeMs, size: stat.size };
 }
 
 export async function buildFileEntry(

@@ -46,43 +46,81 @@ const dbPath = config.dbPath;
 let db: import("better-sqlite3").Database;
 let lastSyncAt = 0;
 let lastSessionSyncAt = 0;
+let fileSyncInProgress = false;
 let embeddingSyncInProgress = false;
+let syncPromise: Promise<void> | null = null;
 const SYNC_COOLDOWN_MS = 5_000;
 const SESSION_SYNC_COOLDOWN_MS = 60_000;
 
 /**
- * Auto-sync if enough time has passed since last sync.
+ * Run a full file + session sync cycle (non-blocking embedding).
+ * Called internally — callers decide whether to await or fire-and-forget.
  */
-async function ensureSynced(): Promise<void> {
+async function runSyncCycle(): Promise<void> {
   const now = Date.now();
   const memoryDue = now - lastSyncAt >= SYNC_COOLDOWN_MS;
   const sessionDue = now - lastSessionSyncAt >= SESSION_SYNC_COOLDOWN_MS;
   if (!memoryDue && !sessionDue) return;
   const workspaceDir = config.workspace;
-  try {
-    if (memoryDue) {
-      await syncMemoryFiles(db, workspaceDir, { chunkSize: config.chunkSize, extraDirs: resolvedExtraDirs(config) });
-      lastSyncAt = Date.now();
-    }
-    if (sessionDue) {
-      await syncSessionFiles(db, {
-        chunkSize: config.chunkSize,
-        maxDays: config.sessionDays,
-        maxCount: config.sessionMax,
-        sessionDirs: config.sessionDirs,
-      });
-      lastSessionSyncAt = Date.now();
-    }
-    // Async embedding sync — don't block, skip if already running
-    if (!embeddingSyncInProgress) {
-      embeddingSyncInProgress = true;
-      syncEmbeddings(db)
-        .catch((err) => console.error("[memory-mcp] embedding sync error:", err))
-        .finally(() => { embeddingSyncInProgress = false; });
-    }
-  } catch (err) {
-    console.error("memory sync error:", err);
+  // Errors propagate to callers: ensureSynced() catches (fire-and-forget),
+  // awaitSynced() lets them propagate so mutation tools can warn the user.
+  if (memoryDue) {
+    await syncMemoryFiles(db, workspaceDir, { chunkSize: config.chunkSize, extraDirs: resolvedExtraDirs(config) });
+    lastSyncAt = Date.now();
   }
+  if (sessionDue) {
+    await syncSessionFiles(db, {
+      chunkSize: config.chunkSize,
+      maxDays: config.sessionDays,
+      maxCount: config.sessionMax,
+      sessionDirs: config.sessionDirs,
+    });
+    lastSessionSyncAt = Date.now();
+  }
+  // Async embedding sync — don't block, skip if already running
+  if (!embeddingSyncInProgress) {
+    embeddingSyncInProgress = true;
+    syncEmbeddings(db)
+      .catch((err) => console.error("[memory-mcp] embedding sync error:", err))
+      .finally(() => { embeddingSyncInProgress = false; });
+  }
+}
+
+/**
+ * Non-blocking sync: fires off file sync in background if not already running.
+ * Tools respond immediately using existing DB data; sync catches up asynchronously.
+ * With the stat-based fast-path, most syncs complete in <1s for unchanged files.
+ * Used for READ-ONLY tools (memory_search, memory_status).
+ */
+function ensureSynced(): void {
+  if (fileSyncInProgress) return;
+  const now = Date.now();
+  if (now - lastSyncAt < SYNC_COOLDOWN_MS && now - lastSessionSyncAt < SESSION_SYNC_COOLDOWN_MS) return;
+  fileSyncInProgress = true;
+  syncPromise = runSyncCycle()
+    .catch((err) => console.error("[memory-mcp] background sync error:", err))
+    .finally(() => { fileSyncInProgress = false; syncPromise = null; });
+}
+
+/**
+ * Blocking sync: awaits file sync completion before returning.
+ * Respects the same cooldown logic to avoid unnecessary re-syncs.
+ * Used for WRITE/MUTATION tools (memory_store, memory_forget, memory_update)
+ * to ensure the DB reflects current disk state before mutations.
+ */
+async function awaitSynced(): Promise<void> {
+  const now = Date.now();
+  if (now - lastSyncAt < SYNC_COOLDOWN_MS && now - lastSessionSyncAt < SESSION_SYNC_COOLDOWN_MS) return;
+  // If a sync is already running (started by ensureSynced or another awaitSynced), wait for it
+  if (syncPromise) {
+    await syncPromise;
+    return;
+  }
+  // Start a new sync and await it — errors propagate to caller
+  fileSyncInProgress = true;
+  syncPromise = runSyncCycle()
+    .finally(() => { fileSyncInProgress = false; syncPromise = null; });
+  await syncPromise;
 }
 
 // --- Tools ---
@@ -100,7 +138,7 @@ server.tool(
     before: z.string().optional().describe("Only include files modified before this ISO 8601 timestamp (filters by file mtime, not individual chunk age)"),
   },
   async ({ query, maxResults, minScore, tokenMax, after, before }) => {
-    await ensureSynced();
+    ensureSynced();
     const effectiveTokenMax = tokenMax ?? config.tokenMax;
     const results = await searchMemory(db, query, { maxResults, minScore, tokenMax: effectiveTokenMax, after, before });
     return {
@@ -226,7 +264,7 @@ server.tool(
   "Show the current status of the memory index (file count, chunk count, last sync time). Includes health checks.",
   {},
   async () => {
-    await ensureSynced();
+    ensureSynced();
     const workspaceDir = config.workspace;
     const fileCount = (db.prepare(`SELECT COUNT(*) as c FROM files`).get() as { c: number }).c;
     const memoryFileCount = (db.prepare(`SELECT COUNT(*) as c FROM files WHERE source = 'memory'`).get() as { c: number }).c;
@@ -351,8 +389,15 @@ server.tool(
       }
     }
 
-    // Semantic dedup: best-effort check (respects cooldown)
-    await ensureSynced();
+    // Semantic dedup: best-effort check (awaits sync for write correctness)
+    let syncWarning: string | null = null;
+    try {
+      await awaitSynced();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[memory-mcp] sync failed for mutation path:", msg);
+      syncWarning = `⚠️ Memory sync failed — results may be stale. Error: ${msg}`;
+    }
     const similar = await searchMemory(db, content, { maxResults: 3, minScore: 0.3 });
     const memHits = similar.filter((r) => r.source === "memory");
     if (memHits.length > 0) {
@@ -375,6 +420,7 @@ server.tool(
                     reason: "semantic_duplicate",
                     similarEntry: sLine.trim(),
                     path: hit.path,
+                    ...(syncWarning ? { syncWarning } : {}),
                   }),
                 },
               ],
@@ -413,6 +459,7 @@ server.tool(
     const relPath = `memory/${cat}.md`;
     const result: Record<string, unknown> = { stored: true, path: relPath, fact: content };
     if (evidencePath) result.evidencePath = evidencePath;
+    if (syncWarning) result.syncWarning = syncWarning;
     return {
       content: [
         {
@@ -526,8 +573,12 @@ async function findMemoryEntry(
   const strMatch = stringMatchEntry(targets, normalized);
   if (strMatch) return strMatch;
 
-  // Phase 2: semantic search fallback
-  await ensureSynced();
+  // Phase 2: semantic search fallback (await sync for write-path correctness)
+  try {
+    await awaitSynced();
+  } catch (err) {
+    console.error("[memory-mcp] sync failed in findMemoryEntry:", err instanceof Error ? err.message : String(err));
+  }
   const results = await searchMemory(db, query, { maxResults: 5, minScore: 0.3 });
   const memoryResults = results.filter((r) => r.source === "memory");
   if (memoryResults.length === 0) return null;
@@ -590,11 +641,18 @@ server.tool(
       .describe("Category file to search in (e.g. 'preferences'). If omitted, searches all memory files."),
   },
   async ({ content, category }) => {
-    await ensureSynced();
+    let syncWarning: string | null = null;
+    try {
+      await awaitSynced();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[memory-mcp] sync failed for mutation path:", msg);
+      syncWarning = `⚠️ Memory sync failed — results may be stale. Error: ${msg}`;
+    }
     const match = await findMemoryEntry(content, category);
     if (!match) {
       return {
-        content: [{ type: "text" as const, text: JSON.stringify({ removed: false, reason: "no matching entry found" }) }],
+        content: [{ type: "text" as const, text: JSON.stringify({ removed: false, reason: "no matching entry found", ...(syncWarning ? { syncWarning } : {}) }) }],
       };
     }
 
@@ -611,7 +669,7 @@ server.tool(
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({ removed: true, path: relPath, removedContent: match.line }),
+        text: JSON.stringify({ removed: true, path: relPath, removedContent: match.line, ...(syncWarning ? { syncWarning } : {}) }),
       }],
     };
   },
@@ -638,11 +696,18 @@ server.tool(
       .describe("New supporting context for the updated fact. Replaces old evidence if present."),
   },
   async ({ old_content, new_content, category, source, evidence }) => {
-    await ensureSynced();
+    let syncWarning: string | null = null;
+    try {
+      await awaitSynced();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[memory-mcp] sync failed for mutation path:", msg);
+      syncWarning = `⚠️ Memory sync failed — results may be stale. Error: ${msg}`;
+    }
     const match = await findMemoryEntry(old_content, category);
     if (!match) {
       return {
-        content: [{ type: "text" as const, text: JSON.stringify({ updated: false, reason: "no matching entry found" }) }],
+        content: [{ type: "text" as const, text: JSON.stringify({ updated: false, reason: "no matching entry found", ...(syncWarning ? { syncWarning } : {}) }) }],
       };
     }
 
@@ -671,6 +736,7 @@ server.tool(
     const relPath = path.relative(config.workspace, match.filePath).replace(/\\/g, "/");
     const result: Record<string, unknown> = { updated: true, path: relPath, old: match.line, new: newEntry };
     if (evidencePath) result.evidencePath = evidencePath;
+    if (syncWarning) result.syncWarning = syncWarning;
     return {
       content: [{
         type: "text" as const,
@@ -686,8 +752,8 @@ async function main() {
   db = await openDatabase(dbPath, { chunkSize: config.chunkSize });
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  // Initial sync on startup
-  await ensureSynced();
+  // Fire-and-forget initial sync — don't block MCP tool registration
+  ensureSynced();
 }
 
 main().catch((err) => {
