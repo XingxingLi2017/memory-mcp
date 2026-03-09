@@ -104,6 +104,9 @@ function ensureSynced(): void {
 /**
  * Blocking sync: awaits file sync completion before returning.
  * Used for WRITE/MUTATION tools — errors propagate so callers can warn users.
+ * Note: intentionally does NOT trigger worker embedding sync (triggerWorkerSync)
+ * because mutations need fresh file index, not embeddings. The next ensureSynced()
+ * or periodic sync will trigger embedding catch-up.
  */
 async function awaitSynced(): Promise<void> {
   const now = Date.now();
@@ -788,7 +791,9 @@ let shuttingDown = false;
 async function gracefulShutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  if (syncPromise) await syncPromise.catch(() => {});
   if (!NO_WORKER) await shutdownWorker();
+  try { db.close(); } catch {}
   process.exit(0);
 }
 

@@ -64,7 +64,7 @@ function parseNonNegativeInt(val: string | undefined, name: string, min?: number
   if (!val) return undefined;
   const n = Number(val);
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
-    throw new Error(`--${name} must be a positive integer, got "${val}"`);
+    throw new Error(`--${name} must be a non-negative integer, got "${val}"`);
   }
   if (min !== undefined && max !== undefined) return Math.max(min, Math.min(max, n));
   return n;

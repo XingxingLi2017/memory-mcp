@@ -271,7 +271,11 @@ export async function syncSessionFiles(
     }
 
     const entry = await buildSessionEntry(absPath);
-    if (!entry) continue; // Failed to parse — do NOT mark active, allows stale cleanup
+    // Parse failure → skip without marking active, allowing stale cleanup on next pass.
+    // This differs from memory files (which preserve stale index on read error) because
+    // session files are append-only logs — a parse failure indicates corruption, not a
+    // transient lock, so removing stale data is the safer choice.
+    if (!entry) continue;
 
     activePaths.add(sessionRelPath); // Successfully built — mark as active
 

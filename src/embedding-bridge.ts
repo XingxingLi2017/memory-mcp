@@ -26,10 +26,6 @@ const pendingQueries = new Map<number, {
   reject: (err: Error) => void;
 }>();
 
-// Callbacks for sync completion
-type SyncCallback = (count: number) => void;
-let syncCallback: SyncCallback | null = null;
-
 interface ReadyMsg { type: "ready" }
 interface InitErrorMsg { type: "init_error"; error: string }
 interface QueryResultMsg { type: "query_result"; id: number; vector: number[] }
@@ -72,11 +68,9 @@ export function initEmbeddingWorker(dbPath: string, modelSpec: string, chunkSize
         break;
       }
       case "sync_complete":
-        if (syncCallback) { const cb = syncCallback; syncCallback = null; cb(msg.count); }
         break;
       case "sync_error":
         console.error("[memory-mcp] embedding sync error:", msg.error);
-        if (syncCallback) { syncCallback = null; }
         break;
     }
   });
@@ -127,11 +121,10 @@ export function embedTextViaWorker(text: string): Promise<number[]> {
 
 /**
  * Trigger a background embedding sync cycle in the worker.
- * Fire-and-forget — does not block. Optional callback on completion.
+ * Fire-and-forget — does not block.
  */
-export function triggerWorkerSync(onComplete?: SyncCallback): void {
+export function triggerWorkerSync(): void {
   if (!worker || !workerReady) return;
-  if (onComplete) syncCallback = onComplete;
   worker.postMessage({ type: "sync_embeddings" });
 }
 

@@ -201,9 +201,14 @@ export async function searchMemory(
     const configFtsWeight = opts?.ftsWeight ?? 0.5;
     const targetVecWeight = (1 - configFtsWeight) * embeddingCoverage;
     const total = configFtsWeight + targetVecWeight;
-    const ftsWeight = configFtsWeight / total;
-    const vecWeight = targetVecWeight / total;
-    results = mergeHybrid(ftsResults, vecResults, ftsWeight, vecWeight);
+    if (total === 0) {
+      // Edge case: ftsWeight=0 and embeddingCoverage=0 — fall through to FTS-only
+      results = ftsResults;
+    } else {
+      const ftsWeight = configFtsWeight / total;
+      const vecWeight = targetVecWeight / total;
+      results = mergeHybrid(ftsResults, vecResults, ftsWeight, vecWeight);
+    }
   } else if (vecResults.length > 0) {
     results = vecResults;
   } else if (ftsResults.length > 0) {
