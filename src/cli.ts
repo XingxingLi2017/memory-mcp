@@ -60,21 +60,23 @@ function parseArgs(args: string[]): { command: string; query?: string; opts: Rec
   return { command, query, opts };
 }
 
-function parseNonNegativeInt(val: string | undefined, name: string): number | undefined {
+function parseNonNegativeInt(val: string | undefined, name: string, min?: number, max?: number): number | undefined {
   if (!val) return undefined;
   const n = Number(val);
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
     throw new Error(`--${name} must be a positive integer, got "${val}"`);
   }
+  if (min !== undefined && max !== undefined) return Math.max(min, Math.min(max, n));
   return n;
 }
 
-function parsePositiveFloat(val: string | undefined, name: string): number | undefined {
+function parsePositiveFloat(val: string | undefined, name: string, min?: number, max?: number): number | undefined {
   if (!val) return undefined;
   const n = Number(val);
   if (!Number.isFinite(n) || n < 0) {
     throw new Error(`--${name} must be a non-negative number, got "${val}"`);
   }
+  if (min !== undefined && max !== undefined) return Math.max(min, Math.min(max, n));
   return n;
 }
 
@@ -182,10 +184,10 @@ async function main(): Promise<void> {
       if (!query) {
         throw new Error("search requires a query argument");
       }
-      const maxResults = parseNonNegativeInt(rest["max-results"], "max-results") ?? 10;
-      const minScore = parsePositiveFloat(rest["min-score"], "min-score");
+      const maxResults = parseNonNegativeInt(rest["max-results"], "max-results", 1, 100) ?? config.maxResults;
+      const minScore = parsePositiveFloat(rest["min-score"], "min-score", 0, 1) ?? config.minScore;
       const tokenMax = parseNonNegativeInt(rest["token-max"], "token-max") ?? config.tokenMax;
-      const results = await searchMemory(db, query, { maxResults, minScore, tokenMax });
+      const results = await searchMemory(db, query, { maxResults, minScore, tokenMax, ftsWeight: config.ftsWeight });
       console.log(JSON.stringify({ results, count: results.length }, null, 2));
     } else if (command === "status") {
       const fileCount = (db.prepare(`SELECT COUNT(*) as c FROM files`).get() as { c: number }).c;

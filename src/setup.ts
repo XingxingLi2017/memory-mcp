@@ -275,6 +275,7 @@ function uninstall(profile: TargetProfile): void {
 const CONFIG_KEYS: (keyof MemoryConfig)[] = [
   "workspace", "dbPath", "chunkSize", "tokenMax",
   "sessionDays", "sessionMax", "sessionDirs", "extraDirs", "model",
+  "ftsWeight", "minScore", "maxResults",
 ];
 
 function handleConfig(args: string[]): void {
@@ -411,7 +412,8 @@ function handleConfig(args: string[]): void {
         console.error(`Error: ${err instanceof Error ? err.message : err}`);
         process.exit(1);
       }
-    } else if (key === "chunkSize" || key === "tokenMax" || key === "sessionDays" || key === "sessionMax") {
+    } else if (key === "chunkSize" || key === "tokenMax" || key === "sessionDays" || key === "sessionMax"
+      || key === "ftsWeight" || key === "minScore" || key === "maxResults") {
       const n = Number(value);
       if (!Number.isFinite(n)) {
         console.error(`${key} must be a number, got "${value}"`);
@@ -422,10 +424,18 @@ function handleConfig(args: string[]): void {
         tokenMax: [100, 16384],
         sessionDays: [0, Infinity],
         sessionMax: [-1, Infinity],
+        ftsWeight: [0, 1],
+        minScore: [0, 1],
+        maxResults: [1, 100],
       };
       const [min, max] = ranges[key]!;
       if (n < min || n > max) {
         console.error(`${key} must be between ${min} and ${max === Infinity ? "∞" : max}, got ${n}`);
+        process.exit(1);
+      }
+      const integerKeys = new Set(["chunkSize", "tokenMax", "sessionDays", "sessionMax", "maxResults"]);
+      if (integerKeys.has(key) && !Number.isInteger(n)) {
+        console.error(`${key} must be an integer, got "${value}"`);
         process.exit(1);
       }
       partial[key] = n;

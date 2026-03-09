@@ -91,7 +91,7 @@ The host CLI will automatically search these files before answering questions ab
 4. Chunks are indexed in **SQLite FTS5** (with jieba pre-segmentation for CJK text)
 5. Chunks are embedded with **embeddinggemma-300M** (768-dim vectors) and stored in **sqlite-vec**
 6. Search runs both FTS5 (BM25 ranking) and vector (cosine similarity) in parallel
-7. Results are **min-max normalized** then merged with 50/50 weighting
+7. Results are **min-max normalized** then merged with configurable FTS/vector weighting (default 50/50, see `ftsWeight`)
 8. Access-count boost gently promotes frequently retrieved chunks
 9. Top-level `MEMORY.md` results receive a score boost (×1.3) for long-term memory priority
 10. Falls back to LIKE search if FTS5 is unavailable
@@ -111,6 +111,8 @@ memory-mcp config --profile learning show
 memory-mcp config set chunkSize 1024
 memory-mcp config set extraDirs /data/obsidian-vault,/data/notes
 memory-mcp config set model /path/to/local-model.gguf
+memory-mcp config set ftsWeight 0.7
+memory-mcp config set minScore 0.05
 
 # Set a value on a specific profile
 memory-mcp config --profile learning set chunkSize 256
@@ -136,6 +138,9 @@ Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$H
     "default": {
       "chunkSize": 512,
       "tokenMax": 4096,
+      "ftsWeight": 0.5,
+      "minScore": 0.01,
+      "maxResults": 10,
       "sessionDays": 30,
       "sessionMax": -1,
       "sessionDirs": [
@@ -169,6 +174,9 @@ Fields omitted from a profile inherit built-in defaults. Each profile workspace 
 | `sessionDirs` | `[copilot, claude]` | Session transcript sources. Default: `~/.copilot/session-state` (copilot) + `~/.claude/projects` (claude). Set to override entirely. JSON format: `[{"dir":"/path","kind":"copilot"}]` |
 | `extraDirs` | `[]` | Extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
 | `model` | `hf:ggml-org/embeddinggemma-300M-GGUF/...` | Embedding model. Accepts a HuggingFace URI (`hf:org/repo/file.gguf`) for auto-download, or a local file path (`/path/to/model.gguf`) |
+| `ftsWeight` | `0.5` | FTS weight in hybrid search (0–1). Vector weight = 1 − ftsWeight. Higher values favor keyword matching; lower values favor semantic similarity |
+| `minScore` | `0.01` | Minimum relevance score threshold (0–1). Results below this are dropped |
+| `maxResults` | `10` | Maximum number of search results returned (1–100) |
 
 ### Profiles
 

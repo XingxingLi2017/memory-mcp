@@ -149,8 +149,8 @@ server.tool(
     "Use before answering questions about prior work, decisions, preferences, or project context.",
   {
     query: z.string().describe("Search query"),
-    maxResults: z.number().optional().describe("Max results to return (default: auto-calculated from token budget)"),
-    minScore: z.number().optional().describe("Minimum relevance score 0-1 (default: 0.01)"),
+    maxResults: z.number().int().min(1).max(100).optional().describe("Max results to return, 1-100 (default: from config, typically 10)"),
+    minScore: z.number().min(0).max(1).optional().describe("Minimum relevance score 0-1 (default: 0.01)"),
     tokenMax: z.number().optional().describe("Maximum total tokens to return (default: 4096). Controls snippet length and result count."),
     after: z.string().optional().describe("Only include files modified after this ISO 8601 timestamp (filters by file mtime, not individual chunk age)"),
     before: z.string().optional().describe("Only include files modified before this ISO 8601 timestamp (filters by file mtime, not individual chunk age)"),
@@ -158,7 +158,14 @@ server.tool(
   async ({ query, maxResults, minScore, tokenMax, after, before }) => {
     ensureSynced();
     const effectiveTokenMax = tokenMax ?? config.tokenMax;
-    const results = await searchMemory(db, query, { maxResults, minScore, tokenMax: effectiveTokenMax, after, before, embedFn: workerEmbedFn });
+    const results = await searchMemory(db, query, {
+      maxResults: maxResults ?? config.maxResults,
+      minScore: minScore ?? config.minScore,
+      tokenMax: effectiveTokenMax,
+      after, before,
+      embedFn: workerEmbedFn,
+      ftsWeight: config.ftsWeight,
+    });
     return {
       content: [
         {
@@ -340,6 +347,9 @@ server.tool(
         tokenMax: config.tokenMax,
         sessionDays: config.sessionDays,
         sessionMax: config.sessionMax,
+        ftsWeight: config.ftsWeight,
+        minScore: config.minScore,
+        maxResults: config.maxResults,
       },
       lastSyncAt: lastSyncAt ? new Date(lastSyncAt).toISOString() : null,
       warnings: warnings.length > 0 ? warnings : undefined,

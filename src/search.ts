@@ -73,6 +73,8 @@ export type SearchOpts = {
    * Default: uses in-process embedText if model is already loaded.
    */
   embedFn?: EmbedFn;
+  /** FTS weight in hybrid merge (0–1). Vector weight = 1 - ftsWeight. Default: 0.5 */
+  ftsWeight?: number;
 };
 
 /**
@@ -193,9 +195,14 @@ export async function searchMemory(
   // Hybrid merge or single-source
   let results: SearchResult[];
   if (ftsResults.length > 0 && vecResults.length > 0) {
-    // Dynamic weight: scale vector contribution by embedding coverage
-    const vecWeight = Math.min(0.5, embeddingCoverage);
-    const ftsWeight = 1 - vecWeight;
+    // Use configured ftsWeight, scaled by embedding coverage.
+    // At full coverage: fts=configFtsWeight, vec=1-configFtsWeight
+    // At partial coverage: vec portion shrinks proportionally, remainder is renormalized
+    const configFtsWeight = opts?.ftsWeight ?? 0.5;
+    const targetVecWeight = (1 - configFtsWeight) * embeddingCoverage;
+    const total = configFtsWeight + targetVecWeight;
+    const ftsWeight = configFtsWeight / total;
+    const vecWeight = targetVecWeight / total;
     results = mergeHybrid(ftsResults, vecResults, ftsWeight, vecWeight);
   } else if (vecResults.length > 0) {
     results = vecResults;
