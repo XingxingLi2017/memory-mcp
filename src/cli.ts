@@ -11,7 +11,7 @@ import { openDatabase } from "./db.js";
 import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
 import { loadConfig, resolvedExtraDirs, type MemoryConfigFile } from "./config.js";
-import { setModelSpec } from "./embedding.js";
+import { setModelSpec, preloadModel } from "./embedding.js";
 
 function printUsage(): void {
   console.error(`Usage: memory-mcp-cli <command> [options]
@@ -143,8 +143,16 @@ async function main(): Promise<void> {
   const workspaceDir = config.workspace;
   const dbPath = config.dbPath;
   const db = await openDatabase(dbPath, { chunkSize: config.chunkSize });
+  let embeddingDone: Promise<void> | undefined;
 
   try {
+    // Preload embedding model in parallel with file sync for search commands.
+    // Model load (~2s cached) overlaps with file sync, so search gets hybrid
+    // results at near-zero extra cost.
+    const modelReady = command === "search"
+      ? preloadModel().catch(() => {})
+      : undefined;
+
     // Sync files before search/status
     const extraDirs = resolvedExtraDirs(config);
     await syncMemoryFiles(db, workspaceDir, { chunkSize: config.chunkSize, extraDirs });
@@ -155,13 +163,25 @@ async function main(): Promise<void> {
       sessionDirs: config.sessionDirs,
     });
 
+    // Best-effort model preload: if model loads within file sync time + grace
+    // period, search gets hybrid results. Otherwise, fall back to FTS-only
+    // (no cold-start blocking — matches the PR's latency objective).
+    const MODEL_PRELOAD_TIMEOUT_MS = 5000;
+    if (modelReady) {
+      const timeout = new Promise<void>((r) => setTimeout(r, MODEL_PRELOAD_TIMEOUT_MS).unref());
+      await Promise.race([modelReady, timeout]);
+    }
+
+    // Embedding sync only for search — status should remain lightweight.
+    // Fire-and-forget: search proceeds immediately with existing embeddings.
+    embeddingDone = command === "search"
+      ? syncEmbeddings(db).then(() => {}).catch(() => {})
+      : undefined;
+
     if (command === "search") {
       if (!query) {
         throw new Error("search requires a query argument");
       }
-      // Embedding sync improves vector search quality — await before search
-      const embeddingDone = syncEmbeddings(db).catch(() => {});
-      await embeddingDone;
       const maxResults = parseNonNegativeInt(rest["max-results"], "max-results") ?? 10;
       const minScore = parsePositiveFloat(rest["min-score"], "min-score");
       const tokenMax = parseNonNegativeInt(rest["token-max"], "token-max") ?? config.tokenMax;
@@ -196,7 +216,13 @@ async function main(): Promise<void> {
     } else {
       throw new Error(`Unknown command: ${command}`);
     }
+
+    // Search results are printed above (stdout available immediately).
   } finally {
+    // Wait for background embedding to finish before closing DB — even on
+    // error paths. This ensures embedding sync completes safely (no mid-write
+    // DB close). The process stays alive until done (may take hours).
+    if (embeddingDone) await embeddingDone;
     db.close();
   }
 }

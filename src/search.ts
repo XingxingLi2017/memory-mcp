@@ -1,7 +1,10 @@
 import type Database from "better-sqlite3";
 import { isFtsAvailable, isVecAvailable } from "./db.js";
 import { segmentQuery } from "./segment.js";
-import { embedText, vectorToBuffer } from "./embedding.js";
+import { embedText, vectorToBuffer, isModelReady } from "./embedding.js";
+
+/** Function type for embedding a query text. Return null to skip vector search. */
+export type EmbedFn = (text: string) => Promise<number[] | null>;
 
 export type SearchResult = {
   path: string;
@@ -63,6 +66,13 @@ export type SearchOpts = {
   after?: string;
   /** ISO 8601 timestamp — only include chunks from files modified before this time */
   before?: string;
+  /**
+   * Custom embed function for query text. When provided, vector search uses this
+   * instead of the direct embedText + isModelReady guard. Return null to skip
+   * vector search (e.g. when worker model isn't loaded yet).
+   * Default: uses in-process embedText if model is already loaded.
+   */
+  embedFn?: EmbedFn;
 };
 
 /**
@@ -136,11 +146,16 @@ export async function searchMemory(
     }
   }
 
-  // Vector search
+  // Vector search — use provided embedFn or fall back to in-process embedText
+  const resolvedEmbedFn: EmbedFn = opts?.embedFn
+    ?? (async (text) => isModelReady() ? embedText(text) : null);
   let vecResults: SearchResult[] = [];
   if (vecOk) {
     try {
-      const queryVec = await embedText(cleaned);
+      const queryVec = await resolvedEmbedFn(cleaned);
+      if (!queryVec) {
+        // embedFn signaled "not ready" — skip vector search
+      } else {
       const queryBuf = vectorToBuffer(queryVec);
       const vecRows = db
         .prepare(
@@ -169,6 +184,7 @@ export async function searchMemory(
           source: row.source,
         }))
         .filter((r) => r.score >= minScore && pathFilter(r));
+      }
     } catch (err) {
       console.error("[memory-mcp] vector search error:", err);
     }

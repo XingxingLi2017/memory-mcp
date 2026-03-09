@@ -706,6 +706,17 @@ function isClaudeCommand(text: string): boolean {
  * user/assistant messages. Auto-detects format from JSON structure.
  * Returns a MemoryFileEntry with the extracted text as content.
  */
+/**
+ * Derive the canonical session-relative path from an absolute .jsonl path.
+ * Copilot: dirname is the UUID  (session-state/{uuid}/events.jsonl)
+ * Claude:  filename is the UUID ({project}/{uuid}.jsonl)
+ */
+export function deriveSessionRelPath(absPath: string): string {
+  const basename = path.basename(absPath, ".jsonl");
+  const sessionId = basename === "events" ? path.basename(path.dirname(absPath)) : basename;
+  return `sessions/${sessionId}.jsonl`;
+}
+
 export async function buildSessionEntry(
   absPath: string,
 ): Promise<SessionFileEntry | null> {
@@ -788,12 +799,7 @@ export async function buildSessionEntry(
     }
     const header = headerParts.length > 0 ? headerParts.join(" | ") + "\n" : "";
     const content = header + collected.join("\n");
-    // Derive session ID from file path:
-    //   Copilot: dirname is the UUID  (session-state/{uuid}/events.jsonl)
-    //   Claude:  filename is the UUID ({project}/{uuid}.jsonl)
-    const basename = path.basename(absPath, ".jsonl");
-    const sessionId = basename === "events" ? path.basename(path.dirname(absPath)) : basename;
-    const relPath = `sessions/${sessionId}.jsonl`;
+    const relPath = deriveSessionRelPath(absPath);
 
     return {
       path: relPath,

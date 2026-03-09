@@ -31,16 +31,32 @@ let embeddingModel: unknown = null;
 let embeddingContext: unknown = null;
 let dimensions: number | null = null;
 let unavailable = false;
+let initPromise: Promise<EmbeddingContext> | null = null;
 
 interface EmbeddingContext {
   getEmbeddingFor(text: string): Promise<{ vector: Float32Array }>;
   dispose(): Promise<void>;
 }
 
+/**
+ * Single-flight model initialization. Concurrent callers share the same
+ * in-progress init promise, preventing duplicate getLlama/loadModel work.
+ */
 async function ensureContext(): Promise<EmbeddingContext> {
   if (unavailable) throw new Error("node-llama-cpp not available");
   if (embeddingContext) return embeddingContext as EmbeddingContext;
+  if (initPromise) return initPromise;
 
+  initPromise = doInit();
+  try {
+    return await initPromise;
+  } catch (err) {
+    initPromise = null;
+    throw err;
+  }
+}
+
+async function doInit(): Promise<EmbeddingContext> {
   let nodeLlamaCpp: typeof import("node-llama-cpp");
   try {
     nodeLlamaCpp = await import("node-llama-cpp");
@@ -78,6 +94,23 @@ function normalize(vec: number[]): number[] {
   const magnitude = Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0));
   if (magnitude < 1e-10) return vec;
   return vec.map((v) => v / magnitude);
+}
+
+/**
+ * Check whether the embedding model is already loaded (no lazy init).
+ * Useful for callers that want to skip vector search when model isn't warm.
+ */
+export function isModelReady(): boolean {
+  return embeddingContext !== null;
+}
+
+/**
+ * Start loading the embedding model without blocking.
+ * Returns a promise that resolves when the model is ready.
+ * Safe to call multiple times — subsequent calls share the same init.
+ */
+export function preloadModel(): Promise<void> {
+  return ensureContext().then(() => {});
 }
 
 /**
@@ -140,6 +173,20 @@ export async function isEmbeddingAvailable(): Promise<boolean> {
     embeddingAvailableCache = false;
     return false;
   }
+}
+
+/**
+ * Resolve model spec to a local file path.
+ * For HF URIs, calls resolveModelFile to get the cached local path.
+ * For local paths, returns as-is. Used to pre-resolve before passing to workers.
+ */
+export async function resolveModelPath(spec?: string): Promise<string> {
+  const s = spec ?? resolveModelSpec();
+  if (isHfUri(s)) {
+    const { resolveModelFile } = await import("node-llama-cpp");
+    return resolveModelFile(s);
+  }
+  return s;
 }
 
 /**

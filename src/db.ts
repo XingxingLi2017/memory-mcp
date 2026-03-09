@@ -177,6 +177,7 @@ function ensureSchema(db: Database.Database, vec: typeof import("sqlite-vec") | 
 
   db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(hash);`);
 
   // FTS5 full-text search index
   try {

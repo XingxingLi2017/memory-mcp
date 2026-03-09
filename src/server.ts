@@ -6,11 +6,17 @@ import { z } from "zod";
 import path from "node:path";
 import fs from "node:fs";
 import { openDatabase } from "./db.js";
-import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
+import { syncMemoryFiles, syncSessionFiles } from "./sync.js";
 import { searchMemory } from "./search.js";
+import type { EmbedFn } from "./search.js";
 import { MEMORY_EXTENSIONS, hashText, buildExtraDirAliases } from "./internal.js";
 import { loadConfig, resolvedExtraDirs, migrateFromLegacyDirs, listProfiles } from "./config.js";
-import { setModelSpec } from "./embedding.js";
+import { setModelSpec, resolveModelPath } from "./embedding.js";
+import { initEmbeddingWorker, isWorkerReady, embedTextViaWorker, triggerWorkerSync, shutdownWorker } from "./embedding-bridge.js";
+
+// Feature flag: set MEMORY_MCP_NO_WORKER=1 to disable worker thread embedding
+// and fall back to FTS-only search in server mode.
+const NO_WORKER = process.env.MEMORY_MCP_NO_WORKER === "1";
 
 // Parse --profile from process.argv or MEMORY_MCP_PROFILE env var
 const serverProfile = (() => {
@@ -47,14 +53,14 @@ let db: import("better-sqlite3").Database;
 let lastSyncAt = 0;
 let lastSessionSyncAt = 0;
 let fileSyncInProgress = false;
-let embeddingSyncInProgress = false;
 let syncPromise: Promise<void> | null = null;
 const SYNC_COOLDOWN_MS = 5_000;
 const SESSION_SYNC_COOLDOWN_MS = 60_000;
 
 /**
- * Run a full file + session sync cycle (non-blocking embedding).
- * Called internally — callers decide whether to await or fire-and-forget.
+ * Run a file + session sync cycle (no embedding).
+ * Embedding sync is handled by the worker thread (see embedding-bridge.ts),
+ * not here, because native model loading blocks the Node.js event loop.
  */
 async function runSyncCycle(): Promise<void> {
   const now = Date.now();
@@ -62,8 +68,6 @@ async function runSyncCycle(): Promise<void> {
   const sessionDue = now - lastSessionSyncAt >= SESSION_SYNC_COOLDOWN_MS;
   if (!memoryDue && !sessionDue) return;
   const workspaceDir = config.workspace;
-  // Errors propagate to callers: ensureSynced() catches (fire-and-forget),
-  // awaitSynced() lets them propagate so mutation tools can warn the user.
   if (memoryDue) {
     await syncMemoryFiles(db, workspaceDir, { chunkSize: config.chunkSize, extraDirs: resolvedExtraDirs(config) });
     lastSyncAt = Date.now();
@@ -77,19 +81,10 @@ async function runSyncCycle(): Promise<void> {
     });
     lastSessionSyncAt = Date.now();
   }
-  // Async embedding sync — don't block, skip if already running
-  if (!embeddingSyncInProgress) {
-    embeddingSyncInProgress = true;
-    syncEmbeddings(db)
-      .catch((err) => console.error("[memory-mcp] embedding sync error:", err))
-      .finally(() => { embeddingSyncInProgress = false; });
-  }
 }
 
 /**
  * Non-blocking sync: fires off file sync in background if not already running.
- * Tools respond immediately using existing DB data; sync catches up asynchronously.
- * With the stat-based fast-path, most syncs complete in <1s for unchanged files.
  * Used for READ-ONLY tools (memory_search, memory_status).
  */
 function ensureSynced(): void {
@@ -98,32 +93,55 @@ function ensureSynced(): void {
   if (now - lastSyncAt < SYNC_COOLDOWN_MS && now - lastSessionSyncAt < SESSION_SYNC_COOLDOWN_MS) return;
   fileSyncInProgress = true;
   syncPromise = runSyncCycle()
-    .catch((err) => console.error("[memory-mcp] background sync error:", err))
-    .finally(() => { fileSyncInProgress = false; syncPromise = null; });
+    .finally(() => {
+      fileSyncInProgress = false; syncPromise = null;
+      triggerWorkerSync(); // embed new/changed chunks in background
+    });
+  // Fire-and-forget: catch to prevent unhandled rejection
+  syncPromise.catch((err) => console.error("[memory-mcp] background sync error:", err));
 }
 
 /**
  * Blocking sync: awaits file sync completion before returning.
- * Respects the same cooldown logic to avoid unnecessary re-syncs.
- * Used for WRITE/MUTATION tools (memory_store, memory_forget, memory_update)
- * to ensure the DB reflects current disk state before mutations.
+ * Used for WRITE/MUTATION tools — errors propagate so callers can warn users.
  */
 async function awaitSynced(): Promise<void> {
   const now = Date.now();
   if (now - lastSyncAt < SYNC_COOLDOWN_MS && now - lastSessionSyncAt < SESSION_SYNC_COOLDOWN_MS) return;
-  // If a sync is already running (started by ensureSynced or another awaitSynced), wait for it
   if (syncPromise) {
     await syncPromise;
     return;
   }
-  // Start a new sync and await it — errors propagate to caller
   fileSyncInProgress = true;
   syncPromise = runSyncCycle()
     .finally(() => { fileSyncInProgress = false; syncPromise = null; });
   await syncPromise;
 }
 
+/**
+ * Await sync with error capture — for mutation tools.
+ * Returns a warning string if sync failed, null on success.
+ */
+async function trySyncForMutation(): Promise<string | null> {
+  try {
+    await awaitSynced();
+    return null;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[memory-mcp] sync failed for mutation path:", msg);
+    return `⚠️ Memory sync failed — results may be stale. Error: ${msg}`;
+  }
+}
+
 // --- Tools ---
+
+/** Embed function for search — uses worker thread if ready, otherwise skips vector search. */
+const workerEmbedFn: EmbedFn = NO_WORKER
+  ? async () => null   // killswitch: always FTS-only
+  : async (text) => {
+      if (!isWorkerReady()) return null;
+      try { return await embedTextViaWorker(text); } catch { return null; }
+    };
 
 server.tool(
   "memory_search",
@@ -140,7 +158,7 @@ server.tool(
   async ({ query, maxResults, minScore, tokenMax, after, before }) => {
     ensureSynced();
     const effectiveTokenMax = tokenMax ?? config.tokenMax;
-    const results = await searchMemory(db, query, { maxResults, minScore, tokenMax: effectiveTokenMax, after, before });
+    const results = await searchMemory(db, query, { maxResults, minScore, tokenMax: effectiveTokenMax, after, before, embedFn: workerEmbedFn });
     return {
       content: [
         {
@@ -390,15 +408,8 @@ server.tool(
     }
 
     // Semantic dedup: best-effort check (awaits sync for write correctness)
-    let syncWarning: string | null = null;
-    try {
-      await awaitSynced();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[memory-mcp] sync failed for mutation path:", msg);
-      syncWarning = `⚠️ Memory sync failed — results may be stale. Error: ${msg}`;
-    }
-    const similar = await searchMemory(db, content, { maxResults: 3, minScore: 0.3 });
+    const syncWarning = await trySyncForMutation();
+    const similar = await searchMemory(db, content, { maxResults: 3, minScore: 0.3, embedFn: workerEmbedFn });
     const memHits = similar.filter((r) => r.source === "memory");
     if (memHits.length > 0) {
       const queryWords = contentWords(content);
@@ -453,8 +464,9 @@ server.tool(
       fs.appendFileSync(filePath, entry + "\n", "utf-8");
     }
 
-    // Reset cooldown so the next tool call triggers re-sync
+    // Reset cooldown and trigger post-write re-sync so new content is indexed
     lastSyncAt = 0;
+    ensureSynced();
 
     const relPath = `memory/${cat}.md`;
     const result: Record<string, unknown> = { stored: true, path: relPath, fact: content };
@@ -574,12 +586,8 @@ async function findMemoryEntry(
   if (strMatch) return strMatch;
 
   // Phase 2: semantic search fallback (await sync for write-path correctness)
-  try {
-    await awaitSynced();
-  } catch (err) {
-    console.error("[memory-mcp] sync failed in findMemoryEntry:", err instanceof Error ? err.message : String(err));
-  }
-  const results = await searchMemory(db, query, { maxResults: 5, minScore: 0.3 });
+  await trySyncForMutation();
+  const results = await searchMemory(db, query, { maxResults: 5, minScore: 0.3, embedFn: workerEmbedFn });
   const memoryResults = results.filter((r) => r.source === "memory");
   if (memoryResults.length === 0) return null;
 
@@ -641,14 +649,7 @@ server.tool(
       .describe("Category file to search in (e.g. 'preferences'). If omitted, searches all memory files."),
   },
   async ({ content, category }) => {
-    let syncWarning: string | null = null;
-    try {
-      await awaitSynced();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[memory-mcp] sync failed for mutation path:", msg);
-      syncWarning = `⚠️ Memory sync failed — results may be stale. Error: ${msg}`;
-    }
+    const syncWarning = await trySyncForMutation();
     const match = await findMemoryEntry(content, category);
     if (!match) {
       return {
@@ -660,7 +661,9 @@ server.tool(
     const lines = fileContent.split("\n");
     lines.splice(match.lineIndex, 1);
     fs.writeFileSync(match.filePath, lines.join("\n"), "utf-8");
+    // Reset cooldown and trigger post-mutation re-sync
     lastSyncAt = 0;
+    ensureSynced();
 
     // Clean up orphan evidence file
     cleanupEvidence(match.line);
@@ -696,14 +699,7 @@ server.tool(
       .describe("New supporting context for the updated fact. Replaces old evidence if present."),
   },
   async ({ old_content, new_content, category, source, evidence }) => {
-    let syncWarning: string | null = null;
-    try {
-      await awaitSynced();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[memory-mcp] sync failed for mutation path:", msg);
-      syncWarning = `⚠️ Memory sync failed — results may be stale. Error: ${msg}`;
-    }
+    const syncWarning = await trySyncForMutation();
     const match = await findMemoryEntry(old_content, category);
     if (!match) {
       return {
@@ -731,7 +727,9 @@ server.tool(
     newEntry += ` — ${timestamp}`;
     lines[match.lineIndex] = newEntry;
     fs.writeFileSync(match.filePath, lines.join("\n"), "utf-8");
+    // Reset cooldown and trigger post-mutation re-sync
     lastSyncAt = 0;
+    ensureSynced();
 
     const relPath = path.relative(config.workspace, match.filePath).replace(/\\/g, "/");
     const result: Record<string, unknown> = { updated: true, path: relPath, old: match.line, new: newEntry };
@@ -752,11 +750,37 @@ async function main() {
   db = await openDatabase(dbPath, { chunkSize: config.chunkSize });
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  // Fire-and-forget initial sync — don't block MCP tool registration
+  // Fire-and-forget initial file sync — doesn't block MCP tool registration
   ensureSynced();
+  // Spawn embedding worker thread — model loads in background (~80s), doesn't
+  // block the main event loop. Once ready, search uses hybrid FTS+vector and
+  // new chunks get embedded progressively.
+  if (!NO_WORKER) {
+    // Resolve HF URI to local path in main thread (avoids 401 in worker).
+    // Non-blocking: MCP tools are already registered and responsive while
+    // this resolves. Worker is spawned once the path is available.
+    resolveModelPath(config.model)
+      .catch(() => config.model)
+      .then((localModelPath) => {
+        initEmbeddingWorker(dbPath, localModelPath, config.chunkSize);
+      });
+  } else {
+    console.error("[memory-mcp] worker thread disabled (MEMORY_MCP_NO_WORKER=1), FTS-only mode");
+  }
 }
 
 main().catch((err) => {
   console.error("memory-mcp fatal:", err);
   process.exit(1);
 });
+
+let shuttingDown = false;
+async function gracefulShutdown(): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (!NO_WORKER) await shutdownWorker();
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => { gracefulShutdown(); });
+process.on("SIGINT", () => { gracefulShutdown(); });

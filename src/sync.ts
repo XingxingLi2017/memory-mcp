@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import fsPromises from "node:fs/promises";
 import path from "node:path";
 import type { SessionDirConfig } from "./config.js";
 import {
@@ -9,6 +10,7 @@ import {
   buildFileEntry,
   buildSessionEntry,
   buildExtraDirAliases,
+  deriveSessionRelPath,
   chunkFile,
   chunkMarkdown,
   type MemoryFileEntry,
@@ -43,7 +45,7 @@ export async function syncMemoryFiles(
   );
 
   const ftsOk = isFtsAvailable(db);
-  const activePaths = new Set(statEntries.map((e) => e.path));
+  const activePaths = new Set<string>();
   let indexed = 0;
   let skipped = 0;
 
@@ -64,12 +66,22 @@ export async function syncMemoryFiles(
       Math.abs(existing.mtime - stat.mtimeMs) < 1 &&
       existing.size === stat.size
     ) {
+      activePaths.add(stat.path);
       skipped++;
       continue;
     }
 
     // Phase 2: read + hash only for changed files
-    const entry = await buildFileEntry(stat.absPath, workspaceDir, extraDirAliases);
+    let entry: MemoryFileEntry;
+    try {
+      entry = await buildFileEntry(stat.absPath, workspaceDir, extraDirAliases);
+    } catch (err) {
+      console.error(`[memory-mcp] failed to read ${stat.path}:`, err instanceof Error ? err.message : String(err));
+      // Keep existing index data — file exists on disk but is transiently unreadable
+      activePaths.add(stat.path);
+      skipped++;
+      continue;
+    }
 
     // Content hash check: file may have same content despite mtime change (e.g. touch)
     if (!opts?.force && existing?.hash === entry.hash) {
@@ -77,11 +89,13 @@ export async function syncMemoryFiles(
       db.prepare(`UPDATE files SET mtime = ?, size = ? WHERE path = ?`).run(
         entry.mtimeMs, entry.size, entry.path,
       );
+      activePaths.add(entry.path);
       skipped++;
       continue;
     }
 
     indexFile(db, entry, ftsOk, "memory", opts?.chunkSize);
+    activePaths.add(entry.path);
     indexed++;
   }
 
@@ -230,16 +244,12 @@ export async function syncSessionFiles(
   let indexed = 0;
   let skipped = 0;
 
-  const fsPromises = await import("node:fs/promises");
   const getFileMeta = db.prepare(
     `SELECT hash, mtime, size FROM files WHERE path = ? AND source = ?`,
   );
 
   for (const absPath of files) {
-    // Derive session relative path without reading the file
-    const basename = path.basename(absPath, ".jsonl");
-    const sessionId = basename === "events" ? path.basename(path.dirname(absPath)) : basename;
-    const sessionRelPath = `sessions/${sessionId}.jsonl`;
+    const sessionRelPath = deriveSessionRelPath(absPath);
 
     // Stat-based fast-path: skip if mtime+size unchanged
     let stat: import("fs").Stats;
