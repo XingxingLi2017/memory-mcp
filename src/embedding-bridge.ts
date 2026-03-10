@@ -87,6 +87,11 @@ export function initEmbeddingWorker(dbPath: string, modelSpec: string, chunkSize
 
   worker.on("exit", (code) => {
     if (code !== 0) console.error("[memory-mcp] embedding worker exited with code", code);
+    // Reject any in-flight queries — worker is gone, promises would hang forever
+    for (const [, q] of pendingQueries) {
+      q.reject(new Error(`Worker exited with code ${code}`));
+    }
+    pendingQueries.clear();
     worker = null;
     workerReady = false;
   });
