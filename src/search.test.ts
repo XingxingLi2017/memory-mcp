@@ -344,7 +344,7 @@ test("partial embedding coverage scales vector weight down", async (t) => {
   assert.ok(results.length > 0, "Partial coverage should still produce results");
 });
 
-test("div-by-zero guard: ftsWeight=0 and zero embedding coverage", async (t) => {
+test("ftsWeight=0 with no embeddings falls back to FTS-only", async (t) => {
   const dbPath = tmpDbPath();
   const db = await seedDb(dbPath);
   t.after(() => { db.close(); cleanupDir(path.dirname(dbPath)); });
@@ -354,6 +354,10 @@ test("div-by-zero guard: ftsWeight=0 and zero embedding coverage", async (t) => 
     return;
   }
 
+  // chunks_vec exists but is empty → embedded=0 → vecOk=false → FTS-only path.
+  // The hybrid merge div-by-zero guard (total===0) is unreachable with current
+  // logic because embedded=0 disables vector search before merge. This test
+  // verifies the FTS-only fallback is safe when ftsWeight=0.
   db.exec(`DELETE FROM chunks_vec`);
 
   const mockEmbedFn = async () => fakeVector(1);
@@ -363,6 +367,7 @@ test("div-by-zero guard: ftsWeight=0 and zero embedding coverage", async (t) => 
   });
 
   assert.ok(Array.isArray(results));
+  assert.ok(results.length > 0, "Should fall back to FTS results");
 });
 
 test("vector search respects maxResults", async (t) => {

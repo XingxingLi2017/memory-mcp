@@ -68,6 +68,7 @@ export function initEmbeddingWorker(dbPath: string, modelSpec: string, chunkSize
         break;
       }
       case "sync_complete":
+        if (msg.count > 0) console.error(`[memory-mcp] embedding sync: ${msg.count} vectors computed`);
         break;
       case "sync_error":
         console.error("[memory-mcp] embedding sync error:", msg.error);
@@ -78,16 +79,15 @@ export function initEmbeddingWorker(dbPath: string, modelSpec: string, chunkSize
   worker.on("error", (err) => {
     console.error("[memory-mcp] embedding worker error:", err.message);
     workerFailed = true;
-    // Reject all pending queries
-    for (const [id, q] of pendingQueries) {
+    for (const [, q] of pendingQueries) {
       q.reject(new Error("Worker crashed"));
-      pendingQueries.delete(id);
     }
+    pendingQueries.clear();
   });
 
   worker.on("exit", (code) => {
     if (code !== 0) console.error("[memory-mcp] embedding worker exited with code", code);
-    // Reject any in-flight queries — worker is gone, promises would hang forever
+    // Safety net: reject any remaining queries (error handler may have already cleared)
     for (const [, q] of pendingQueries) {
       q.reject(new Error(`Worker exited with code ${code}`));
     }

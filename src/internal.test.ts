@@ -109,8 +109,7 @@ test("chunkJson handles array", () => {
 
 test("chunkJson handles empty object", () => {
   const chunks = chunkJson("{}");
-  // Empty object may produce 0 or 1 chunks depending on implementation
-  assert.ok(chunks.length <= 1);
+  assert.equal(chunks.length, 1);
 });
 
 test("chunkJson handles invalid JSON gracefully", () => {
@@ -193,8 +192,15 @@ test("chunkFile routes .txt to chunkMarkdown", () => {
 // ---------------------------------------------------------------------------
 
 test("deriveSessionRelPath extracts session relative path", () => {
-  // Copilot style: .../session-state/{uuid}/events.jsonl
+  // Copilot style: .../session-state/{uuid}/events.jsonl → sessions/{uuid}.jsonl
   const result = deriveSessionRelPath("/home/user/.copilot/session-state/abc-123/events.jsonl");
-  assert.ok(result.startsWith("sessions/"));
-  assert.ok(result.endsWith(".jsonl"));
+  assert.equal(result, "sessions/abc-123.jsonl");
+
+  // Direct .jsonl file: .../sessions/my-session.jsonl → sessions/my-session.jsonl
+  const result2 = deriveSessionRelPath("/data/sessions/my-session.jsonl");
+  assert.equal(result2, "sessions/my-session.jsonl");
+
+  // Windows path
+  const result3 = deriveSessionRelPath("C:\\Users\\user\\.copilot\\session-state\\def-456\\events.jsonl");
+  assert.equal(result3, "sessions/def-456.jsonl");
 });
