@@ -5,8 +5,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { openDatabase, isFtsAvailable, isVecAvailable } from "./db.js";
-import { vectorToBuffer } from "./embedding.js";
+import { openDatabase, isFtsAvailable, isVecAvailable } from "../src/db.js";
+import { vectorToBuffer } from "../src/embedding.js";
 import type Database from "better-sqlite3";
 
 // ---------------------------------------------------------------------------

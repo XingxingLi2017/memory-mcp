@@ -17,7 +17,7 @@ import {
   DEFAULTS,
   DEFAULT_PROFILE,
   type ConfigFileData,
-} from "./config.js";
+} from "../src/config.js";
 import { tmpConfigDir, cleanupDir } from "./test-utils.js";
 
 // ---------------------------------------------------------------------------

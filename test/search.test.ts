@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { searchMemory, type SearchOpts } from "./search.js";
-import { isVecAvailable } from "./db.js";
+import { searchMemory, type SearchOpts } from "../src/search.js";
+import { isVecAvailable } from "../src/db.js";
 import {
   tmpDbPath, seedDb, seedDbWithVectors, fakeVector, cleanupDir,
 } from "./test-utils.js";

@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { openDatabase, isFtsAvailable } from "./db.js";
-import { syncMemoryFiles, type SyncResult } from "./sync.js";
-import { hashText } from "./internal.js";
+import { openDatabase, isFtsAvailable } from "../src/db.js";
+import { syncMemoryFiles, type SyncResult } from "../src/sync.js";
+import { hashText } from "../src/internal.js";
 import { tmpWorkspace, writeFile, cleanupDir } from "./test-utils.js";
 
 // ---------------------------------------------------------------------------

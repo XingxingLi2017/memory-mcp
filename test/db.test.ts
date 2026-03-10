@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { openDatabase, isFtsAvailable, isVecAvailable } from "./db.js";
+import { openDatabase, isFtsAvailable, isVecAvailable } from "../src/db.js";
 import { tmpDbPath, cleanupDir } from "./test-utils.js";
 
 // ---------------------------------------------------------------------------

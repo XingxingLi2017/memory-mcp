@@ -9,7 +9,7 @@ import {
   chunkYaml,
   chunkFile,
   deriveSessionRelPath,
-} from "./internal.js";
+} from "../src/internal.js";
 
 // ---------------------------------------------------------------------------
 // hashText
