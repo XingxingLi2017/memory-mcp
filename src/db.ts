@@ -248,3 +248,13 @@ export function isVecAvailable(db: Database.Database): boolean {
     return false;
   }
 }
+
+export function countValidEmbeddings(db: Database.Database): number {
+  try {
+    return (db.prepare(
+      `SELECT COUNT(*) as c FROM chunks_vec v WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.id = v.id)`,
+    ).get() as { c: number }).c;
+  } catch {
+    return 0;
+  }
+}

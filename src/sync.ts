@@ -128,6 +128,10 @@ export async function syncMemoryFiles(
       // sqlite-vec may not support IN — fall back to per-row delete
       try { for (const c of chunkIds) db.prepare(`DELETE FROM chunks_vec WHERE id = ?`).run(c.id); } catch {}
     }
+    // If vec deletes still fail here, orphan embeddings remain until the next
+    // syncEmbeddings() pass, which runs a global NOT EXISTS sweep. That's
+    // acceptable because search joins chunks_vec back to chunks by id, so stale
+    // vec rows are ignored until then.
     deleted++;
   }
 
@@ -317,6 +321,10 @@ export async function syncSessionFiles(
     } catch {
       try { for (const c of chunkIds) db.prepare(`DELETE FROM chunks_vec WHERE id = ?`).run(c.id); } catch {}
     }
+    // If vec deletes still fail here, orphan embeddings remain until the next
+    // syncEmbeddings() pass, which runs a global NOT EXISTS sweep. That's
+    // acceptable because search joins chunks_vec back to chunks by id, so stale
+    // vec rows are ignored until then.
     deleted++;
   }
 
@@ -398,7 +406,8 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
 
   try {
     const orphanCount = db.prepare(
-      `DELETE FROM chunks_vec WHERE id NOT IN (SELECT id FROM chunks)`,
+      `DELETE FROM chunks_vec
+       WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chunks.id = chunks_vec.id)`,
     ).run();
     if (orphanCount.changes > 0) {
       console.error(`[memory-mcp] cleaned up ${orphanCount.changes} orphan embedding(s)`);
