@@ -397,6 +397,13 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
   if (!tryAcquireEmbeddingLock(db)) return 0;
 
   try {
+    const orphanCount = db.prepare(
+      `DELETE FROM chunks_vec WHERE id NOT IN (SELECT id FROM chunks)`,
+    ).run();
+    if (orphanCount.changes > 0) {
+      console.error(`[memory-mcp] cleaned up ${orphanCount.changes} orphan embedding(s)`);
+    }
+
     const totalChunks = (db.prepare(`SELECT COUNT(*) as c FROM chunks`).get() as { c: number }).c;
     let totalEmbedded = 0;
     let batchCount = 0;

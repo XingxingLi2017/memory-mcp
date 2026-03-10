@@ -300,7 +300,7 @@ server.tool(
     const chunkCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks`).get() as { c: number }).c;
     let vecCount = 0;
     try {
-      vecCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks_vec`).get() as { c: number }).c;
+      vecCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks_vec v WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.id = v.id)`).get() as { c: number }).c;
     } catch {}
     let cacheCount = 0;
     try {

@@ -195,7 +195,9 @@ async function main(): Promise<void> {
       const sessionFileCount = (db.prepare(`SELECT COUNT(*) as c FROM files WHERE source = 'sessions'`).get() as { c: number }).c;
       const chunkCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks`).get() as { c: number }).c;
       let vecCount = 0;
-      try { vecCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks_vec`).get() as { c: number }).c; } catch {}
+      try {
+        vecCount = (db.prepare(`SELECT COUNT(*) as c FROM chunks_vec v WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.id = v.id)`).get() as { c: number }).c;
+      } catch {}
       let cacheCount = 0;
       try { cacheCount = (db.prepare(`SELECT COUNT(*) as c FROM embedding_cache`).get() as { c: number }).c; } catch {}
       console.log(JSON.stringify({
