@@ -1,7 +1,10 @@
 import type Database from "better-sqlite3";
 import { isFtsAvailable, isVecAvailable } from "./db.js";
 import { segmentQuery } from "./segment.js";
-import { embedText, vectorToBuffer } from "./embedding.js";
+import { embedText, vectorToBuffer, isModelReady } from "./embedding.js";
+
+/** Function type for embedding a query text. Return null to skip vector search. */
+export type EmbedFn = (text: string) => Promise<number[] | null>;
 
 export type SearchResult = {
   path: string;
@@ -63,6 +66,15 @@ export type SearchOpts = {
   after?: string;
   /** ISO 8601 timestamp — only include chunks from files modified before this time */
   before?: string;
+  /**
+   * Custom embed function for query text. When provided, vector search uses this
+   * instead of the direct embedText + isModelReady guard. Return null to skip
+   * vector search (e.g. when worker model isn't loaded yet).
+   * Default: uses in-process embedText if model is already loaded.
+   */
+  embedFn?: EmbedFn;
+  /** FTS weight in hybrid merge (0–1). Vector weight = 1 - ftsWeight. Default: 0.5 */
+  ftsWeight?: number;
 };
 
 /**
@@ -136,11 +148,16 @@ export async function searchMemory(
     }
   }
 
-  // Vector search
+  // Vector search — use provided embedFn or fall back to in-process embedText
+  const resolvedEmbedFn: EmbedFn = opts?.embedFn
+    ?? (async (text) => isModelReady() ? embedText(text) : null);
   let vecResults: SearchResult[] = [];
   if (vecOk) {
     try {
-      const queryVec = await embedText(cleaned);
+      const queryVec = await resolvedEmbedFn(cleaned);
+      if (!queryVec) {
+        // embedFn signaled "not ready" — skip vector search
+      } else {
       const queryBuf = vectorToBuffer(queryVec);
       const vecRows = db
         .prepare(
@@ -169,6 +186,7 @@ export async function searchMemory(
           source: row.source,
         }))
         .filter((r) => r.score >= minScore && pathFilter(r));
+      }
     } catch (err) {
       console.error("[memory-mcp] vector search error:", err);
     }
@@ -177,10 +195,20 @@ export async function searchMemory(
   // Hybrid merge or single-source
   let results: SearchResult[];
   if (ftsResults.length > 0 && vecResults.length > 0) {
-    // Dynamic weight: scale vector contribution by embedding coverage
-    const vecWeight = Math.min(0.5, embeddingCoverage);
-    const ftsWeight = 1 - vecWeight;
-    results = mergeHybrid(ftsResults, vecResults, ftsWeight, vecWeight);
+    // Use configured ftsWeight, scaled by embedding coverage.
+    // At full coverage: fts=configFtsWeight, vec=1-configFtsWeight
+    // At partial coverage: vec portion shrinks proportionally, remainder is renormalized
+    const configFtsWeight = opts?.ftsWeight ?? 0.5;
+    const targetVecWeight = (1 - configFtsWeight) * embeddingCoverage;
+    const total = configFtsWeight + targetVecWeight;
+    if (total === 0) {
+      // Edge case: ftsWeight=0 and embeddingCoverage=0 — fall through to FTS-only
+      results = ftsResults;
+    } else {
+      const ftsWeight = configFtsWeight / total;
+      const vecWeight = targetVecWeight / total;
+      results = mergeHybrid(ftsResults, vecResults, ftsWeight, vecWeight);
+    }
   } else if (vecResults.length > 0) {
     results = vecResults;
   } else if (ftsResults.length > 0) {

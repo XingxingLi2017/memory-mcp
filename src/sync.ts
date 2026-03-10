@@ -1,15 +1,20 @@
 import type Database from "better-sqlite3";
+import fsPromises from "node:fs/promises";
+import path from "node:path";
 import type { SessionDirConfig } from "./config.js";
 import {
   hashText,
   listMemoryFiles,
   listSessionFiles,
+  statFileEntry,
   buildFileEntry,
   buildSessionEntry,
   buildExtraDirAliases,
+  deriveSessionRelPath,
   chunkFile,
   chunkMarkdown,
   type MemoryFileEntry,
+  type FileStatEntry,
 } from "./internal.js";
 import { isFtsAvailable, isVecAvailable } from "./db.js";
 import { segmentText } from "./segment.js";
@@ -23,7 +28,8 @@ export type SyncResult = {
 
 /**
  * Sync memory files into the database.
- * Incremental: skips files whose SHA256 hash hasn't changed.
+ * Two-phase: stat-based fast-path skips unchanged files (mtime+size),
+ * only reading content for files that actually changed.
  */
 export async function syncMemoryFiles(
   db: Database.Database,
@@ -32,26 +38,64 @@ export async function syncMemoryFiles(
 ): Promise<SyncResult> {
   const files = await listMemoryFiles(workspaceDir, opts?.extraDirs);
   const extraDirAliases = opts?.extraDirs ? buildExtraDirAliases(opts.extraDirs) : undefined;
-  const entries = await Promise.all(
-    files.map((f) => buildFileEntry(f, workspaceDir, extraDirAliases)),
+
+  // Phase 1: stat-only pass — identify changed files by mtime+size
+  const statEntries = await Promise.all(
+    files.map((f) => statFileEntry(f, workspaceDir, extraDirAliases)),
   );
 
   const ftsOk = isFtsAvailable(db);
-  const activePaths = new Set(entries.map((e) => e.path));
+  const activePaths = new Set<string>();
   let indexed = 0;
   let skipped = 0;
 
-  for (const entry of entries) {
-    const existing = db
-      .prepare(`SELECT hash FROM files WHERE path = ? AND source = ?`)
-      .get(entry.path, "memory") as { hash: string } | undefined;
+  // Prepare DB lookup for existing file metadata
+  const getFileMeta = db.prepare(
+    `SELECT hash, mtime, size FROM files WHERE path = ? AND source = ?`,
+  );
 
+  for (const stat of statEntries) {
+    const existing = getFileMeta.get(stat.path, "memory") as
+      | { hash: string; mtime: number; size: number }
+      | undefined;
+
+    // Fast path: skip if mtime and size haven't changed (and not forced)
+    if (
+      !opts?.force &&
+      existing &&
+      Math.abs(existing.mtime - stat.mtimeMs) < 1 &&
+      existing.size === stat.size
+    ) {
+      activePaths.add(stat.path);
+      skipped++;
+      continue;
+    }
+
+    // Phase 2: read + hash only for changed files
+    let entry: MemoryFileEntry;
+    try {
+      entry = await buildFileEntry(stat.absPath, workspaceDir, extraDirAliases);
+    } catch (err) {
+      console.error(`[memory-mcp] failed to read ${stat.path}:`, err instanceof Error ? err.message : String(err));
+      // Keep existing index data — file exists on disk but is transiently unreadable
+      activePaths.add(stat.path);
+      skipped++;
+      continue;
+    }
+
+    // Content hash check: file may have same content despite mtime change (e.g. touch)
     if (!opts?.force && existing?.hash === entry.hash) {
+      // Update mtime in DB so next stat check can skip it
+      db.prepare(`UPDATE files SET mtime = ?, size = ? WHERE path = ?`).run(
+        entry.mtimeMs, entry.size, entry.path,
+      );
+      activePaths.add(entry.path);
       skipped++;
       continue;
     }
 
     indexFile(db, entry, ftsOk, "memory", opts?.chunkSize);
+    activePaths.add(entry.path);
     indexed++;
   }
 
@@ -184,7 +228,7 @@ function indexFile(
 
 /**
  * Sync session transcript files (events.jsonl) into the database.
- * Extracts user/assistant messages and indexes them as source="sessions".
+ * Uses stat-based fast-path to skip unchanged files.
  */
 export async function syncSessionFiles(
   db: Database.Database,
@@ -200,17 +244,45 @@ export async function syncSessionFiles(
   let indexed = 0;
   let skipped = 0;
 
+  const getFileMeta = db.prepare(
+    `SELECT hash, mtime, size FROM files WHERE path = ? AND source = ?`,
+  );
+
   for (const absPath of files) {
+    const sessionRelPath = deriveSessionRelPath(absPath);
+
+    // Stat-based fast-path: skip if mtime+size unchanged
+    let stat: import("fs").Stats;
+    try { stat = await fsPromises.stat(absPath); } catch { continue; }
+
+    const existing = getFileMeta.get(sessionRelPath, "sessions") as
+      | { hash: string; mtime: number; size: number }
+      | undefined;
+
+    if (
+      !opts?.force &&
+      existing &&
+      Math.abs(existing.mtime - stat.mtimeMs) < 1 &&
+      existing.size === stat.size
+    ) {
+      activePaths.add(sessionRelPath); // Unchanged and previously indexed — still active
+      skipped++;
+      continue;
+    }
+
     const entry = await buildSessionEntry(absPath);
+    // Parse failure → skip without marking active, allowing stale cleanup on next pass.
+    // This differs from memory files (which preserve stale index on read error) because
+    // session files are append-only logs — a parse failure indicates corruption, not a
+    // transient lock, so removing stale data is the safer choice.
     if (!entry) continue;
 
-    activePaths.add(entry.path);
-
-    const existing = db
-      .prepare(`SELECT hash FROM files WHERE path = ? AND source = ?`)
-      .get(entry.path, "sessions") as { hash: string } | undefined;
+    activePaths.add(sessionRelPath); // Successfully built — mark as active
 
     if (!opts?.force && existing?.hash === entry.hash) {
+      db.prepare(`UPDATE files SET mtime = ?, size = ? WHERE path = ?`).run(
+        entry.mtimeMs, entry.size, entry.path,
+      );
       skipped++;
       continue;
     }

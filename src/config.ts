@@ -28,6 +28,12 @@ export interface MemoryConfig {
   sessionDirs: SessionDirConfig[];
   extraDirs: string[];
   model: string;
+  /** FTS weight in hybrid search (0–1). Vector weight = 1 - ftsWeight. Default: 0.5 */
+  ftsWeight: number;
+  /** Minimum relevance score threshold (0–1). Results below this are dropped. Default: 0.01 */
+  minScore: number;
+  /** Maximum number of search results returned. Default: 10 */
+  maxResults: number;
 }
 
 /** Partial config as stored in the JSON file (all fields optional). */
@@ -74,6 +80,9 @@ export const DEFAULTS: Readonly<MemoryConfig> = {
   sessionDirs: DEFAULT_SESSION_DIRS as SessionDirConfig[],
   extraDirs: [],
   model: DEFAULT_MODEL,
+  ftsWeight: 0.5,
+  minScore: 0.01,
+  maxResults: 10,
 };
 
 export const CONFIG_FILENAME = "memory-mcp.json";
@@ -181,6 +190,9 @@ export function loadConfig(
     sessionDirs: overrides?.sessionDirs ?? file.sessionDirs ?? DEFAULTS.sessionDirs,
     extraDirs: overrides?.extraDirs ?? file.extraDirs ?? DEFAULTS.extraDirs,
     model: overrides?.model ?? file.model ?? DEFAULTS.model,
+    ftsWeight: clamp(overrides?.ftsWeight ?? file.ftsWeight, 0, 1, DEFAULTS.ftsWeight),
+    minScore: clamp(overrides?.minScore ?? file.minScore, 0, 1, DEFAULTS.minScore),
+    maxResults: Math.round(clamp(overrides?.maxResults ?? file.maxResults, 1, 100, DEFAULTS.maxResults)),
   };
 }
 

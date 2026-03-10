@@ -3,24 +3,24 @@
   "version": "0.1.0",
   "description": "Local memory management MCP server for Copilot CLI",
   "type": "module",
-  "main": "dist/server.js",
+  "main": "dist/src/server.js",
   "bin": {
-    "memory-mcp": "dist/setup.js",
-    "memory-mcp-cli": "dist/cli.js"
+    "memory-mcp": "dist/src/setup.js",
+    "memory-mcp-cli": "dist/src/cli.js"
   },
   "files": [
-    "dist",
+    "dist/src",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/server.js",
+    "start": "node dist/src/server.js",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build",
-    "preuninstall": "node dist/setup.js uninstall; node dist/setup.js uninstall --claude",
-    "test": "node --test dist/**/*.test.js"
+    "preuninstall": "node dist/src/setup.js uninstall; node dist/src/setup.js uninstall --claude",
+    "test": "node --test dist/test/**/*.test.js"
   },
   "keywords": [
     "mcp",

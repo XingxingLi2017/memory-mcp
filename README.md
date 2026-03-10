@@ -14,7 +14,9 @@ Indexes `MEMORY.md` and `memory/` files into a SQLite database with **hybrid sea
 - **Multi-format** — indexes `.md`, `.txt`, `.json`, `.jsonl`, `.yaml`, `.yml` files
 - **Graceful degradation** — vector search requires optional native dependencies; falls back to FTS-only if unavailable
 - **Session transcript indexing** — automatically indexes Copilot CLI (`events.jsonl`) and Claude Code (`~/.claude/projects/`) conversation history for cross-session search
-- **Incremental sync** — SHA256-based change detection; unchanged files are skipped
+- **Stat-based fast sync** — two-phase sync checks mtime + size first, only reads files that actually changed
+- **Worker-thread embedding** — model loading and inference run in an isolated worker thread, keeping the MCP event loop responsive
+- **Non-blocking read / blocking write** — read tools (search, status) fire-and-forget sync; write tools await fresh sync
 - **Embedding cache** — content-hash keyed cache avoids re-embedding unchanged text across file moves/renames
 - **Access tracking** — frequently accessed chunks get a gentle score boost
 
@@ -76,8 +78,8 @@ The host CLI will automatically search these files before answering questions ab
 
 | Tool | Description |
 |------|-------------|
-| `memory_search` | Hybrid search (BM25 + vector) across all memory files. Supports `query`, `maxResults`, `minScore`, `after`/`before` time filters |
-| `memory_get` | Read specific lines from a memory file |
+| `memory_search` | Hybrid search (BM25 + vector) across all memory files. Supports `query`, `maxResults`, `minScore`, `tokenMax`, `after`/`before` time filters. Session transcripts are tagged with `distillHint: true` |
+| `memory_get` | Read specific lines from a memory file. Supports `path`, `from` (starting line, 1-based), `lines` (count; omit for entire file) |
 | `memory_write` | Save a fact with optional evidence. The system auto-chunks evidence and links it to the fact via `[ref:evidence/...]` for traceability |
 | `memory_forget` | Remove a memory entry by semantic matching. Cleans up linked evidence files |
 | `memory_update` | Replace a memory entry with new content and optional new evidence. Cleans up old evidence |
@@ -86,15 +88,17 @@ The host CLI will automatically search these files before answering questions ab
 ## How it Works
 
 1. The host CLI spawns the MCP server on startup (via stdio)
-2. On each search, syncs `MEMORY.md`, `memory.md`, and `memory/` directory
-3. Files are chunked intelligently by format: markdown by headings, JSON by top-level keys/array elements, JSONL by line, YAML by top-level keys or `---` document separators
-4. Chunks are indexed in **SQLite FTS5** (with jieba pre-segmentation for CJK text)
-5. Chunks are embedded with **embeddinggemma-300M** (768-dim vectors) and stored in **sqlite-vec**
-6. Search runs both FTS5 (BM25 ranking) and vector (cosine similarity) in parallel
-7. Results are **min-max normalized** then merged with 50/50 weighting
-8. Access-count boost gently promotes frequently retrieved chunks
-9. Top-level `MEMORY.md` results receive a score boost (×1.3) for long-term memory priority
-10. Falls back to LIKE search if FTS5 is unavailable
+2. A **worker thread** is spawned in the background to load the embedding model and handle vector operations — this keeps the main event loop responsive
+3. On each tool call, file sync runs in the background (**non-blocking** for reads like `memory_search`; **blocking** for writes like `memory_write` to ensure dedup sees latest state)
+4. Sync uses a **stat-based fast-path**: checks mtime + size first, only reads and hashes files that actually changed
+5. Files are chunked intelligently by format: markdown by headings, JSON by top-level keys/array elements, JSONL by line, YAML by top-level keys or `---` document separators
+6. Chunks are indexed in **SQLite FTS5** (with jieba pre-segmentation for CJK text)
+7. Chunks are embedded with **embeddinggemma-300M** (768-dim vectors) in the worker thread and stored in **sqlite-vec**
+8. Search runs both FTS5 (BM25 ranking) and vector (cosine similarity) in parallel
+9. Results are **min-max normalized** then merged with configurable FTS/vector weighting (default 50/50, see `ftsWeight`). Vector weight is dynamically scaled by embedding coverage — during index warmup, the system gracefully degrades toward FTS-only
+10. Access-count boost gently promotes frequently retrieved chunks: `0.85 × base_score + 0.15 × log₂(1 + access_count) / 10`
+11. Top-level `MEMORY.md` / `memory.md` / `MEMORY.txt` / `memory.txt` results receive a score boost (×1.3) for long-term memory priority
+12. Falls back to LIKE search if FTS5 is unavailable
 
 ## Configuration
 
@@ -111,6 +115,8 @@ memory-mcp config --profile learning show
 memory-mcp config set chunkSize 1024
 memory-mcp config set extraDirs /data/obsidian-vault,/data/notes
 memory-mcp config set model /path/to/local-model.gguf
+memory-mcp config set ftsWeight 0.7
+memory-mcp config set minScore 0.05
 
 # Set a value on a specific profile
 memory-mcp config --profile learning set chunkSize 256
@@ -136,6 +142,9 @@ Config is stored in `~/.memory-mcp-workdir/memory-mcp.json` (cross-platform: `$H
     "default": {
       "chunkSize": 512,
       "tokenMax": 4096,
+      "ftsWeight": 0.5,
+      "minScore": 0.01,
+      "maxResults": 10,
       "sessionDays": 30,
       "sessionMax": -1,
       "sessionDirs": [
@@ -166,9 +175,12 @@ Fields omitted from a profile inherit built-in defaults. Each profile workspace 
 | `tokenMax` | `4096` | Default max tokens per search response (100–16384). Controls snippet length and result count |
 | `sessionDays` | `30` | Only index session transcripts from the last N days (0 = index all) |
 | `sessionMax` | `-1` | Max number of sessions to index, newest first (-1 = no limit, 0 = disable session indexing) |
-| `sessionDirs` | `[copilot, claude]` | Session transcript sources. Default: `~/.copilot/session-state` (copilot) + `~/.claude/projects` (claude). Set to override entirely. JSON format: `[{"dir":"/path","kind":"copilot"}]` |
+| `sessionDirs` | `[copilot, claude]` | Session transcript sources. Copilot scans `{dir}/{uuid}/events.jsonl`; Claude scans `{dir}/{project}/*.jsonl`. Default: `~/.copilot/session-state` (copilot) + `~/.claude/projects` (claude). JSON format: `[{"dir":"/path","kind":"copilot"}]` |
 | `extraDirs` | `[]` | Extra directories to index (e.g. Obsidian vault). Files are stored with `extra:<dirname>/` prefix |
 | `model` | `hf:ggml-org/embeddinggemma-300M-GGUF/...` | Embedding model. Accepts a HuggingFace URI (`hf:org/repo/file.gguf`) for auto-download, or a local file path (`/path/to/model.gguf`) |
+| `ftsWeight` | `0.5` | FTS weight in hybrid search (0–1). Vector weight = 1 − ftsWeight. Higher values favor keyword matching; lower values favor semantic similarity |
+| `minScore` | `0.01` | Minimum relevance score threshold (0–1). Results below this are dropped |
+| `maxResults` | `10` | Maximum number of search results returned (1–100) |
 
 ### Profiles
 
@@ -214,11 +226,22 @@ memory-mcp-cli search "query" --max-results 10 --min-score 0.1
 memory-mcp-cli status
 ```
 
-All config keys can be temporarily overridden via CLI flags:
+### Search flags
+
+| Flag | Description |
+|------|-------------|
+| `--max-results N` | Max results to return (1–100, default: from config) |
+| `--min-score N` | Minimum relevance score (0–1, default: from config) |
+| `--token-max N` | Max total tokens in response (default: from config) |
+
+### Global config override flags
+
+All config keys can be temporarily overridden via CLI flags (kebab-case):
 
 ```bash
 memory-mcp-cli search "query" --workspace /tmp/alt-memory
 memory-mcp-cli status --chunk-size 1024 --session-days 7
+memory-mcp-cli search "query" --profile learning --model /path/to/model.gguf
 ```
 
 Or run directly: `node dist/cli.js search "query"`
@@ -233,7 +256,9 @@ When upgrading from a version that used `~/.copilot/` or `~/.claude/` as the wor
 
 **Breaking changes:**
 
-- All `MEMORY_*` environment variables have been removed. Configuration is now managed entirely through the config file (`~/.memory-mcp-workdir/memory-mcp.json`). Use `memory-mcp config set <key> <value>` to migrate your settings.
+- Most `MEMORY_*` environment variables have been removed. Configuration is now managed through the config file (`~/.memory-mcp-workdir/memory-mcp.json`). Use `memory-mcp config set <key> <value>` to migrate your settings. Two environment variables remain:
+  - `MEMORY_MCP_PROFILE` — select a named profile for the MCP server (alternative to `--profile` flag)
+  - `MEMORY_MCP_NO_WORKER=1` — disable the worker-thread embedding engine, fall back to FTS-only search
 - The `--config` CLI flag has been removed. Use `--profile` to select a named profile instead.
 
 ## Uninstall

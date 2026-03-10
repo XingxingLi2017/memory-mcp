@@ -58,12 +58,16 @@ function extOf(name: string): string {
   return i === -1 ? "" : name.slice(i).toLowerCase();
 }
 
-export type MemoryFileEntry = {
+/** Lightweight stat-only file info for fast change detection. */
+export type FileStatEntry = {
   /** Relative path from workspace root */
   path: string;
   absPath: string;
   mtimeMs: number;
   size: number;
+};
+
+export type MemoryFileEntry = FileStatEntry & {
   hash: string;
   /** File content (cached from initial read) */
   content: string;
@@ -154,6 +158,29 @@ async function walkDir(dir: string, files: string[], skippedSymlinks?: string[])
       files.push(full);
     }
   }
+}
+
+/**
+ * Lightweight stat-only entry — no file read, no hash.
+ * Used for fast mtime+size change detection against the DB.
+ */
+export async function statFileEntry(
+  absPath: string,
+  workspaceDir: string,
+  extraDirAliases?: Map<string, string>,
+): Promise<FileStatEntry> {
+  const stat = await fs.stat(absPath);
+  let relPath = path.relative(workspaceDir, absPath).replace(/\\/g, "/");
+  if (extraDirAliases && relPath.startsWith("..")) {
+    for (const [dir, alias] of extraDirAliases) {
+      const rel = path.relative(dir, absPath).replace(/\\/g, "/");
+      if (!rel.startsWith("..")) {
+        relPath = `extra:${alias}/${rel}`;
+        break;
+      }
+    }
+  }
+  return { path: relPath, absPath, mtimeMs: stat.mtimeMs, size: stat.size };
 }
 
 export async function buildFileEntry(
@@ -679,6 +706,17 @@ function isClaudeCommand(text: string): boolean {
  * user/assistant messages. Auto-detects format from JSON structure.
  * Returns a MemoryFileEntry with the extracted text as content.
  */
+/**
+ * Derive the canonical session-relative path from an absolute .jsonl path.
+ * Copilot: dirname is the UUID  (session-state/{uuid}/events.jsonl)
+ * Claude:  filename is the UUID ({project}/{uuid}.jsonl)
+ */
+export function deriveSessionRelPath(absPath: string): string {
+  const basename = path.basename(absPath, ".jsonl");
+  const sessionId = basename === "events" ? path.basename(path.dirname(absPath)) : basename;
+  return `sessions/${sessionId}.jsonl`;
+}
+
 export async function buildSessionEntry(
   absPath: string,
 ): Promise<SessionFileEntry | null> {
@@ -761,12 +799,7 @@ export async function buildSessionEntry(
     }
     const header = headerParts.length > 0 ? headerParts.join(" | ") + "\n" : "";
     const content = header + collected.join("\n");
-    // Derive session ID from file path:
-    //   Copilot: dirname is the UUID  (session-state/{uuid}/events.jsonl)
-    //   Claude:  filename is the UUID ({project}/{uuid}.jsonl)
-    const basename = path.basename(absPath, ".jsonl");
-    const sessionId = basename === "events" ? path.basename(path.dirname(absPath)) : basename;
-    const relPath = `sessions/${sessionId}.jsonl`;
+    const relPath = deriveSessionRelPath(absPath);
 
     return {
       path: relPath,

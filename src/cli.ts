@@ -11,7 +11,7 @@ import { openDatabase } from "./db.js";
 import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
 import { searchMemory } from "./search.js";
 import { loadConfig, resolvedExtraDirs, type MemoryConfigFile } from "./config.js";
-import { setModelSpec } from "./embedding.js";
+import { setModelSpec, preloadModel } from "./embedding.js";
 
 function printUsage(): void {
   console.error(`Usage: memory-mcp-cli <command> [options]
@@ -60,21 +60,23 @@ function parseArgs(args: string[]): { command: string; query?: string; opts: Rec
   return { command, query, opts };
 }
 
-function parseNonNegativeInt(val: string | undefined, name: string): number | undefined {
+function parseNonNegativeInt(val: string | undefined, name: string, min?: number, max?: number): number | undefined {
   if (!val) return undefined;
   const n = Number(val);
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
-    throw new Error(`--${name} must be a positive integer, got "${val}"`);
+    throw new Error(`--${name} must be a non-negative integer, got "${val}"`);
   }
+  if (min !== undefined && max !== undefined) return Math.max(min, Math.min(max, n));
   return n;
 }
 
-function parsePositiveFloat(val: string | undefined, name: string): number | undefined {
+function parsePositiveFloat(val: string | undefined, name: string, min?: number, max?: number): number | undefined {
   if (!val) return undefined;
   const n = Number(val);
   if (!Number.isFinite(n) || n < 0) {
     throw new Error(`--${name} must be a non-negative number, got "${val}"`);
   }
+  if (min !== undefined && max !== undefined) return Math.max(min, Math.min(max, n));
   return n;
 }
 
@@ -143,9 +145,17 @@ async function main(): Promise<void> {
   const workspaceDir = config.workspace;
   const dbPath = config.dbPath;
   const db = await openDatabase(dbPath, { chunkSize: config.chunkSize });
+  let embeddingDone: Promise<void> | undefined;
 
   try {
-    // Sync before search
+    // Preload embedding model in parallel with file sync for search commands.
+    // Model load (~2s cached) overlaps with file sync, so search gets hybrid
+    // results at near-zero extra cost.
+    const modelReady = command === "search"
+      ? preloadModel().catch(() => {})
+      : undefined;
+
+    // Sync files before search/status
     const extraDirs = resolvedExtraDirs(config);
     await syncMemoryFiles(db, workspaceDir, { chunkSize: config.chunkSize, extraDirs });
     await syncSessionFiles(db, {
@@ -154,18 +164,30 @@ async function main(): Promise<void> {
       maxCount: config.sessionMax,
       sessionDirs: config.sessionDirs,
     });
-    // Fire off embedding sync (non-blocking — search proceeds immediately)
-    // Cross-process lock in syncEmbeddings ensures only one process embeds at a time.
-    const embeddingDone = syncEmbeddings(db).catch(() => {});
+
+    // Best-effort model preload: if model loads within file sync time + grace
+    // period, search gets hybrid results. Otherwise, fall back to FTS-only
+    // (no cold-start blocking — matches the PR's latency objective).
+    const MODEL_PRELOAD_TIMEOUT_MS = 5000;
+    if (modelReady) {
+      const timeout = new Promise<void>((r) => setTimeout(r, MODEL_PRELOAD_TIMEOUT_MS).unref());
+      await Promise.race([modelReady, timeout]);
+    }
+
+    // Embedding sync only for search — status should remain lightweight.
+    // Fire-and-forget: search proceeds immediately with existing embeddings.
+    embeddingDone = command === "search"
+      ? syncEmbeddings(db).then(() => {}).catch(() => {})
+      : undefined;
 
     if (command === "search") {
       if (!query) {
         throw new Error("search requires a query argument");
       }
-      const maxResults = parseNonNegativeInt(rest["max-results"], "max-results") ?? 10;
-      const minScore = parsePositiveFloat(rest["min-score"], "min-score");
+      const maxResults = parseNonNegativeInt(rest["max-results"], "max-results", 1, 100) ?? config.maxResults;
+      const minScore = parsePositiveFloat(rest["min-score"], "min-score", 0, 1) ?? config.minScore;
       const tokenMax = parseNonNegativeInt(rest["token-max"], "token-max") ?? config.tokenMax;
-      const results = await searchMemory(db, query, { maxResults, minScore, tokenMax });
+      const results = await searchMemory(db, query, { maxResults, minScore, tokenMax, ftsWeight: config.ftsWeight });
       console.log(JSON.stringify({ results, count: results.length }, null, 2));
     } else if (command === "status") {
       const fileCount = (db.prepare(`SELECT COUNT(*) as c FROM files`).get() as { c: number }).c;
@@ -197,9 +219,12 @@ async function main(): Promise<void> {
       throw new Error(`Unknown command: ${command}`);
     }
 
-    // Wait for embedding to finish before closing DB
-    await embeddingDone;
+    // Search results are printed above (stdout available immediately).
   } finally {
+    // Wait for background embedding to finish before closing DB — even on
+    // error paths. This ensures embedding sync completes safely (no mid-write
+    // DB close). The process stays alive until done (may take hours).
+    if (embeddingDone) await embeddingDone;
     db.close();
   }
 }
