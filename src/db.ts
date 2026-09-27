@@ -19,6 +19,12 @@ async function ensureSqliteVec(): Promise<typeof import("sqlite-vec") | null> {
 
 const SCHEMA_VERSION = 8;
 const EMBEDDING_DIMS = 768;
+const CREATE_VEC_TABLE_SQL = `
+  CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
+    id TEXT PRIMARY KEY,
+    embedding float[${EMBEDDING_DIMS}] distance_metric=cosine
+  );
+`;
 
 export async function openDatabase(dbPath: string, opts?: { chunkSize?: number }): Promise<Database.Database> {
   const dir = path.dirname(dbPath);
@@ -208,12 +214,7 @@ function ensureSchema(db: Database.Database, vec: typeof import("sqlite-vec") | 
   // Vector search table (sqlite-vec) — only if extension loaded
   if (vec) {
     try {
-      db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
-          id TEXT PRIMARY KEY,
-          embedding float[${EMBEDDING_DIMS}] distance_metric=cosine
-        );
-      `);
+      db.exec(CREATE_VEC_TABLE_SQL);
     } catch (err) {
       console.error("sqlite-vec table creation failed:", err);
     }
@@ -247,6 +248,94 @@ export function isVecAvailable(db: Database.Database): boolean {
   } catch {
     return false;
   }
+}
+
+export type VecHealth = {
+  /** Storage blocks allocated by vec0 (chunks_vec_chunks rows). */
+  blocks: number;
+  /** Total vector slots across all blocks. */
+  slots: number;
+  /** Live vectors (chunks_vec_rowids rows). */
+  live: number;
+  /** live / slots, or 1 when no slots are allocated. */
+  utilization: number;
+};
+
+/**
+ * Read vec0 storage health from its shadow tables. Cheap: never touches the
+ * vector blobs. Returns null when the vector table is unavailable.
+ *
+ * sqlite-vec only reuses deleted slots in the newest block, so delete+insert
+ * churn leaves dead blocks behind that every KNN query still scans.
+ */
+export function getVecHealth(db: Database.Database): VecHealth | null {
+  try {
+    const { blocks, slots } = db.prepare(
+      `SELECT COUNT(*) AS blocks, COALESCE(SUM(size), 0) AS slots FROM chunks_vec_chunks`,
+    ).get() as { blocks: number; slots: number };
+    const { live } = db.prepare(`SELECT COUNT(*) AS live FROM chunks_vec_rowids`).get() as { live: number };
+    return { blocks, slots, live, utilization: slots > 0 ? live / slots : 1 };
+  } catch {
+    return null;
+  }
+}
+
+/** Status fields shared by memory_status and the CLI status command. */
+export function vecHealthStatus(db: Database.Database): {
+  vecBlocks: number; vecSlots: number; vecLive: number; vecUtilization: number;
+} {
+  const h = getVecHealth(db);
+  return {
+    vecBlocks: h?.blocks ?? 0,
+    vecSlots: h?.slots ?? 0,
+    vecLive: h?.live ?? 0,
+    vecUtilization: Number((h?.utilization ?? 1).toFixed(4)),
+  };
+}
+
+export const COMPACT_MAX_UTILIZATION = 0.25;
+export const COMPACT_MIN_DEAD_SLOTS = 20000;
+
+export type CompactResult = {
+  compacted: boolean;
+  before: VecHealth | null;
+  after: VecHealth | null;
+};
+
+/**
+ * Rebuild chunks_vec from its live vectors when utilization is low and enough
+ * slots are dead (or always with force). VACUUM alone cannot reclaim vec0
+ * blocks. Vectors whose chunk no longer exists are dropped.
+ */
+export type CompactOptions = { force?: boolean; maxUtilization?: number; minDeadSlots?: number };
+
+export function compactVectorIndex(db: Database.Database, opts?: CompactOptions): CompactResult {
+  const before = getVecHealth(db);
+  if (!before) return { compacted: false, before, after: before };
+  const maxUtilization = opts?.maxUtilization ?? COMPACT_MAX_UTILIZATION;
+  const minDeadSlots = opts?.minDeadSlots ?? COMPACT_MIN_DEAD_SLOTS;
+  const dead = before.slots - before.live;
+  if (!opts?.force && !(before.utilization < maxUtilization && dead > minDeadSlots)) {
+    return { compacted: false, before, after: before };
+  }
+
+  const rebuild = db.transaction(() => {
+    const rows = db.prepare(
+      `SELECT v.id, v.embedding FROM chunks_vec v JOIN chunks c ON c.id = v.id`,
+    ).all() as Array<{ id: string; embedding: Buffer }>;
+    db.exec(`DROP TABLE chunks_vec`);
+    db.exec(CREATE_VEC_TABLE_SQL);
+    const insert = db.prepare(`INSERT INTO chunks_vec (id, embedding) VALUES (?, ?)`);
+    for (const row of rows) insert.run(row.id, row.embedding);
+  });
+  rebuild.immediate();
+
+  const after = getVecHealth(db);
+  console.error(
+    `[memory-mcp] compacted vector index: blocks ${before.blocks} -> ${after?.blocks ?? 0}, ` +
+      `live ${before.live} -> ${after?.live ?? 0}`,
+  );
+  return { compacted: true, before, after };
 }
 
 export function countValidEmbeddings(db: Database.Database): number {

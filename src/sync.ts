@@ -16,7 +16,7 @@ import {
   type MemoryFileEntry,
   type FileStatEntry,
 } from "./internal.js";
-import { isFtsAvailable, isVecAvailable } from "./db.js";
+import { compactVectorIndex, isFtsAvailable, isVecAvailable, type CompactOptions } from "./db.js";
 import { segmentText } from "./segment.js";
 import { embedBatch, vectorToBuffer } from "./embedding.js";
 
@@ -153,70 +153,74 @@ function indexFile(
   const filtered = chunks.filter((c) => c.text.trim().length > 0);
   const now = Date.now();
 
-  // Salvage existing embeddings before clearing (keyed by content hash)
-  const oldVecs = new Map<string, Buffer>();
-  const oldChunkIds = db
-    .prepare(`SELECT id FROM chunks WHERE path = ? AND source = ?`)
-    .all(entry.path, source) as Array<{ id: string }>;
-  try {
-    for (const { id } of oldChunkIds) {
-      const row = db.prepare(
-        `SELECT c.hash, v.embedding FROM chunks c JOIN chunks_vec v ON v.id = c.id WHERE c.id = ?`,
-      ).get(id) as { hash: string; embedding: Buffer } | undefined;
-      if (row) oldVecs.set(row.hash, row.embedding);
-    }
-  } catch {}
-
-  // Clear old data for this file (including vectors)
-  try {
-    for (const { id } of oldChunkIds) {
-      db.prepare(`DELETE FROM chunks_vec WHERE id = ?`).run(id);
-    }
-  } catch {}
-  db.prepare(`DELETE FROM chunks WHERE path = ? AND source = ?`).run(entry.path, source);
-  if (ftsOk) {
-    try {
-      db.prepare(`DELETE FROM chunks_fts WHERE path = ? AND source = ?`).run(entry.path, source);
-    } catch {}
-  }
-
-  // Generate chunk IDs
   const chunkData = filtered.map((chunk) => ({
     ...chunk,
     id: hashText(`${source}:${entry.path}:${chunk.startLine}:${chunk.endLine}:${chunk.hash}`),
   }));
+  const newIds = new Set(chunkData.map((c) => c.id));
 
+  // Chunk ids encode position and content, so a shared id means an identical
+  // chunk: keep its chunk, FTS and vector rows. Rewriting them would leave a
+  // dead vec0 slot behind on every edit.
+  const oldIds = new Set(
+    (db.prepare(`SELECT id FROM chunks WHERE path = ? AND source = ?`).all(entry.path, source) as Array<{ id: string }>)
+      .map((r) => r.id),
+  );
+  const removedIds = [...oldIds].filter((id) => !newIds.has(id));
+  const addedChunks = chunkData.filter((c) => !oldIds.has(c.id));
+
+  const vecOk = isVecAvailable(db);
   const insertChunk = db.prepare(
     `INSERT INTO chunks (id, path, source, start_line, end_line, hash, text, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
-
   const insertFts = ftsOk
     ? db.prepare(
         `INSERT INTO chunks_fts (text, id, path, source, start_line, end_line)
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
     : null;
-
-  const insertVec = isVecAvailable(db)
-    ? db.prepare(`INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?, ?)`)
-    : null;
   const findCache = db.prepare(`SELECT embedding FROM embedding_cache WHERE hash = ?`);
 
   const transaction = db.transaction(() => {
-    for (const chunk of chunkData) {
+    // Salvage vectors of removed chunks by content hash (e.g. a chunk that
+    // only moved lines; best effort), then delete the removed rows. Delete
+    // errors propagate so the whole re-index rolls back instead of leaving
+    // orphan vector or FTS rows.
+    const salvaged = new Map<string, Buffer>();
+    if (vecOk) {
+      const getVec = db.prepare(
+        `SELECT c.hash, v.embedding FROM chunks c JOIN chunks_vec v ON v.id = c.id WHERE c.id = ?`,
+      );
+      const deleteVec = db.prepare(`DELETE FROM chunks_vec WHERE id = ?`);
+      for (const id of removedIds) {
+        try {
+          const row = getVec.get(id) as { hash: string; embedding: Buffer } | undefined;
+          if (row) salvaged.set(row.hash, row.embedding);
+        } catch {}
+        deleteVec.run(id);
+      }
+    }
+    for (let i = 0; i < removedIds.length; i += DELETE_BATCH) {
+      const batch = removedIds.slice(i, i + DELETE_BATCH);
+      const placeholders = batch.map(() => "?").join(",");
+      db.prepare(`DELETE FROM chunks WHERE id IN (${placeholders})`).run(...batch);
+      if (ftsOk) {
+        db.prepare(
+          `DELETE FROM chunks_fts WHERE path = ? AND source = ? AND id IN (${placeholders})`,
+        ).run(entry.path, source, ...batch);
+      }
+    }
+
+    for (const chunk of addedChunks) {
       insertChunk.run(chunk.id, entry.path, source, chunk.startLine, chunk.endLine, chunk.hash, chunk.text, now);
       insertFts?.run(segmentText(chunk.text), chunk.id, entry.path, source, chunk.startLine, chunk.endLine);
-      if (!insertVec) continue;
-      // Re-insert embedding: prefer salvaged vec, fallback to embedding_cache
-      const savedVec = oldVecs.get(chunk.hash);
-      if (savedVec) {
-        try { insertVec.run(chunk.id, savedVec); } catch {}
-      } else {
-        const cached = findCache.get(chunk.hash) as { embedding: Buffer } | undefined;
-        if (cached) {
-          try { insertVec.run(chunk.id, cached.embedding); } catch {}
-        }
+      if (!vecOk) continue;
+      // Prefer a salvaged vector, then embedding_cache; otherwise syncEmbeddings fills it later
+      const vec = salvaged.get(chunk.hash)
+        ?? (findCache.get(chunk.hash) as { embedding: Buffer } | undefined)?.embedding;
+      if (vec) {
+        try { insertVecIfMissing(db, chunk.id, vec); } catch {}
       }
     }
 
@@ -228,6 +232,20 @@ function indexFile(
   });
 
   transaction();
+}
+
+const DELETE_BATCH = 500;
+
+/**
+ * Insert a vector only when the id has none. vec0 never frees a replaced
+ * slot outside its newest block, so chunks_vec is never written with
+ * INSERT OR REPLACE. An existing vector for the same id already matches,
+ * because chunk ids include the content hash.
+ */
+function insertVecIfMissing(db: Database.Database, id: string, embedding: Buffer): boolean {
+  if (db.prepare(`SELECT 1 FROM chunks_vec_rowids WHERE id = ?`).get(id)) return false;
+  db.prepare(`INSERT INTO chunks_vec (id, embedding) VALUES (?, ?)`).run(id, embedding);
+  return true;
 }
 
 /**
@@ -338,7 +356,7 @@ export async function syncSessionFiles(
  */
 const MAX_LOCK_AGE_MS = 1 * 60 * 60 * 1000; // 1 hour — generous for weak machines
 
-function tryAcquireEmbeddingLock(db: Database.Database): boolean {
+export function tryAcquireEmbeddingLock(db: Database.Database): boolean {
   try {
     // BEGIN IMMEDIATE acquires a write lock immediately, preventing races
     db.exec("BEGIN IMMEDIATE");
@@ -380,7 +398,7 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-function releaseEmbeddingLock(db: Database.Database): void {
+export function releaseEmbeddingLock(db: Database.Database): void {
   try {
     const row = db.prepare(`SELECT value FROM meta WHERE key = 'embedding_lock'`).get() as
       | { value: string }
@@ -398,7 +416,10 @@ function releaseEmbeddingLock(db: Database.Database): void {
  * Compute and store embeddings for chunks that don't have them yet.
  * Uses a cross-process PID lock so only one process embeds at a time.
  */
-export async function syncEmbeddings(db: Database.Database): Promise<number> {
+export async function syncEmbeddings(
+  db: Database.Database,
+  opts?: { compact?: CompactOptions },
+): Promise<number> {
   const vecOk = isVecAvailable(db);
   if (!vecOk) return 0;
 
@@ -422,7 +443,6 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
        LIMIT 100`,
     );
     const findCache = db.prepare(`SELECT embedding FROM embedding_cache WHERE hash = ?`);
-    const insertVec = db.prepare(`INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?, ?)`);
     const insertCache = db.prepare(
       `INSERT OR REPLACE INTO embedding_cache (hash, embedding, updated_at) VALUES (?, ?, ?)`,
     );
@@ -461,14 +481,14 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
       const now = Date.now();
       const tx = db.transaction(() => {
         for (const [id, buf] of cached) {
-          insertVec.run(id, buf);
+          insertVecIfMissing(db, id, buf);
         }
         for (let i = 0; i < uncached.length; i++) {
           const item = uncached[i]!;
           const vec = newEmbeddings[i];
           if (!vec || vec.length === 0) continue;
           const buf = vectorToBuffer(vec);
-          insertVec.run(item.id, buf);
+          insertVecIfMissing(db, item.id, buf);
           insertCache.run(item.hash, buf, now);
         }
       });
@@ -497,6 +517,13 @@ export async function syncEmbeddings(db: Database.Database): Promise<number> {
     try {
       db.prepare(`DELETE FROM embedding_cache WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chunks.hash = embedding_cache.hash)`).run();
     } catch {}
+
+    // Still inside the embedding lock, so only one process rebuilds chunks_vec
+    try {
+      compactVectorIndex(db, opts?.compact);
+    } catch (err) {
+      console.error("[memory-mcp] vector index compaction failed:", err instanceof Error ? err.message : String(err));
+    }
 
     return totalEmbedded;
   } finally {

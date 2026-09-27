@@ -224,7 +224,16 @@ memory-mcp-cli search "query" --max-results 10 --min-score 0.1
 
 # Index status
 memory-mcp-cli status
+
+# Rebuild the vector index and reclaim disk space
+memory-mcp-cli compact
 ```
+
+### Vector index compaction
+
+sqlite-vec only reuses deleted vector slots in its newest storage block, so edits that replace chunks leave dead blocks behind that every vector query still scans. Indexing only rewrites chunks whose content or position changed, and after each embedding pass the index is rebuilt automatically when fewer than 25% of its slots are live and more than 20,000 are dead.
+
+`memory-mcp-cli compact` forces that rebuild, then runs `VACUUM` and prints file size and vector health before and after. If another process is using the database, `VACUUM` may be skipped; the rebuild still applies. `status` and `memory_status` report `vecBlocks`, `vecSlots`, `vecLive` and `vecUtilization`. When the index holds far more blocks than its live vectors need, search skips vector matching, returns full-text results and logs a hint to run `compact`.
 
 ### Search flags
 
