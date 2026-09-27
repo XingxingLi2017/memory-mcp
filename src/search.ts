@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { isFtsAvailable, isVecAvailable } from "./db.js";
+import { getVecHealth, isFtsAvailable, isVecAvailable, type VecHealth } from "./db.js";
 import { segmentQuery } from "./segment.js";
 import { embedText, vectorToBuffer, isModelReady } from "./embedding.js";
 
@@ -36,6 +36,18 @@ function bm25RankToScore(rank: number): number {
   const absRank = Math.abs(rank);
   if (absRank === 0) return 0;
   return absRank / (1 + absRank);
+}
+
+/** Allow this many times the blocks the live vectors need before skipping KNN. */
+const VEC_BLOAT_FACTOR = 4;
+/** Small indexes never trip the guard. */
+const VEC_BLOAT_MIN_BLOCKS = 64;
+
+/** True when vec0 holds far more blocks than its live vectors need. */
+export function isVecBloated(health: VecHealth): boolean {
+  const slotsPerBlock = health.blocks > 0 ? health.slots / health.blocks : 1;
+  const needed = Math.ceil(health.live / slotsPerBlock);
+  return health.blocks > Math.max(VEC_BLOAT_MIN_BLOCKS, VEC_BLOAT_FACTOR * needed);
 }
 
 const SNIPPET_MAX_CHARS = 700;
@@ -101,6 +113,19 @@ export async function searchMemory(
 
   const ftsOk = isFtsAvailable(db);
   let vecOk = isVecAvailable(db);
+
+  // Bloated vec0 storage makes every KNN query scan all dead blocks (minutes
+  // on large indexes); fall back to FTS until the index is compacted.
+  if (vecOk) {
+    const health = getVecHealth(db);
+    if (health && isVecBloated(health)) {
+      vecOk = false;
+      console.error(
+        `[memory-mcp] vector index is bloated (${health.blocks} blocks for ${health.live} vectors); ` +
+          `skipping vector search. Run "memory-mcp-cli compact" to rebuild it.`,
+      );
+    }
+  }
 
   // Use vector search whenever any embeddings exist (progressive — no hard threshold)
   let embeddingCoverage = 0;

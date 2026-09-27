@@ -7,8 +7,15 @@
  */
 
 import path from "node:path";
-import { countValidEmbeddings, openDatabase } from "./db.js";
-import { syncMemoryFiles, syncSessionFiles, syncEmbeddings } from "./sync.js";
+import fs from "node:fs";
+import { compactVectorIndex, countValidEmbeddings, openDatabase, vecHealthStatus } from "./db.js";
+import {
+  syncMemoryFiles,
+  syncSessionFiles,
+  syncEmbeddings,
+  tryAcquireEmbeddingLock,
+  releaseEmbeddingLock,
+} from "./sync.js";
 import { searchMemory } from "./search.js";
 import { loadConfig, resolvedExtraDirs, type MemoryConfigFile } from "./config.js";
 import { setModelSpec, preloadModel } from "./embedding.js";
@@ -23,6 +30,8 @@ Commands:
     --token-max N     Max tokens in response (default: from config)
 
   status            Show index status
+
+  compact           Rebuild the vector index from live vectors, then VACUUM
 
 Global flags:
   --profile <name>      Use a named profile (default: from config)
@@ -145,6 +154,14 @@ async function main(): Promise<void> {
   const workspaceDir = config.workspace;
   const dbPath = config.dbPath;
   const db = await openDatabase(dbPath, { chunkSize: config.chunkSize });
+  if (command === "compact") {
+    try {
+      runCompact(db, dbPath);
+    } finally {
+      db.close();
+    }
+    return;
+  }
   let embeddingDone: Promise<void> | undefined;
 
   try {
@@ -207,6 +224,7 @@ async function main(): Promise<void> {
         chunks: chunkCount,
         embeddedChunks: vecCount,
         embeddingCache: cacheCount,
+        ...vecHealthStatus(db),
         config: {
           chunkSize: config.chunkSize,
           tokenMax: config.tokenMax,
@@ -226,6 +244,60 @@ async function main(): Promise<void> {
     if (embeddingDone) await embeddingDone;
     db.close();
   }
+}
+
+function dbFileBytes(dbPath: string): number {
+  let total = 0;
+  for (const suffix of ["", "-wal"]) {
+    try { total += fs.statSync(dbPath + suffix).size; } catch {}
+  }
+  return total;
+}
+
+function runCompact(db: import("better-sqlite3").Database, dbPath: string): void {
+  const sizeBefore = dbFileBytes(dbPath);
+  const vecBefore = vecHealthStatus(db);
+  // Same lock as syncEmbeddings, so a rebuild never races another process writing vectors
+  if (!tryAcquireEmbeddingLock(db)) {
+    console.log(JSON.stringify({
+      dbPath,
+      compacted: false,
+      reason: "embedding lock is held by another memory-mcp process; retry when it finishes",
+      before: { fileBytes: sizeBefore, ...vecBefore },
+    }, null, 2));
+    process.exitCode = 1;
+    return;
+  }
+  let compacted: boolean;
+  try {
+    compacted = compactVectorIndex(db, { force: true }).compacted;
+  } finally {
+    releaseEmbeddingLock(db);
+  }
+  let vacuumed = true;
+  let walTruncated = false;
+  try {
+    db.exec("VACUUM");
+  } catch (err) {
+    // Another process holding the database can block VACUUM; the rebuild still applies
+    vacuumed = false;
+    console.error("[memory-mcp] VACUUM skipped:", err instanceof Error ? err.message : String(err));
+  }
+  try {
+    const [row] = db.pragma("wal_checkpoint(TRUNCATE)") as Array<{ busy: number }>;
+    walTruncated = row?.busy === 0;
+    if (!walTruncated) console.error("[memory-mcp] WAL not truncated: database busy in another connection");
+  } catch (err) {
+    console.error("[memory-mcp] WAL checkpoint failed:", err instanceof Error ? err.message : String(err));
+  }
+  console.log(JSON.stringify({
+    dbPath,
+    compacted,
+    vacuumed,
+    walTruncated,
+    before: { fileBytes: sizeBefore, ...vecBefore },
+    after: { fileBytes: dbFileBytes(dbPath), ...vecHealthStatus(db) },
+  }, null, 2));
 }
 
 main().catch((err) => {

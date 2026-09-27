@@ -5,7 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import path from "node:path";
 import fs from "node:fs";
-import { countValidEmbeddings, openDatabase } from "./db.js";
+import { countValidEmbeddings, openDatabase, vecHealthStatus } from "./db.js";
 import { syncMemoryFiles, syncSessionFiles } from "./sync.js";
 import { searchMemory } from "./search.js";
 import type { EmbedFn } from "./search.js";
@@ -342,6 +342,7 @@ server.tool(
       chunks: chunkCount,
       embeddedChunks: vecCount,
       embeddingCache: cacheCount,
+      ...vecHealthStatus(db),
       config: {
         chunkSize: config.chunkSize,
         tokenMax: config.tokenMax,
